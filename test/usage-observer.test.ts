@@ -51,7 +51,11 @@ function harness() {
     const expectedResponse = response;
     const returned = await window.fetch('/endpoint', { headers: { Authorization: 'private-test-value' }, ...init });
     expect(returned).toBe(expectedResponse);
-    if (new URL(url).origin === 'https://chatgpt.com' && /^\/backend-api\/(wham\/usage|conversation\/init|conversation\/prepare|models)$/.test(new URL(url).pathname)) await inspected;
+    const parsed = new URL(url);
+    if (parsed.origin === 'https://chatgpt.com' && (
+      /^\/backend-api\/(wham\/usage|conversation\/init|conversation\/prepare|models)$/.test(parsed.pathname) ||
+      /^\/backend-api\/(?:f\/)?conversation\/[0-9a-f-]{36}\/?$/i.test(parsed.pathname)
+    )) await inspected;
     else await new Promise(resolve => setTimeout(resolve, 0));
   }
   async function feedSse(chunks: string[], init: Record<string, unknown> = { method: 'POST' }, url = 'https://chatgpt.com/backend-api/conversation') {
@@ -336,4 +340,49 @@ describe('MAIN-world usage projection', () => {
     await h.feedSse([`data: {"conversation_id":"${a}","nested":{"conversation_id":"${b}"},"request_id":"wfr_conflict"}\n\n`]);
     expect(h.posts).toEqual([]);
   });
+  it('projects the newest server conversation branch without private reasoning', async () => {
+    const h = harness();
+    const conversationId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const u1 = '11111111-1111-4111-8111-111111111111';
+    const a1 = '22222222-2222-4222-8222-222222222222';
+    const staleU = '33333333-3333-4333-8333-333333333333';
+    const staleA = '44444444-4444-4444-8444-444444444444';
+    const mobileU = '55555555-5555-4555-8555-555555555555';
+    const mobileA = '66666666-6666-4666-8666-666666666666';
+    const privateA = '77777777-7777-4777-8777-777777777777';
+    const user = (id: string, text: string, at: number) => ({ id, author: { role: 'user' }, create_time: at,
+      content: { content_type: 'text', parts: [text] }, metadata: {} });
+    const assistant = (id: string, text: string, at: number, channel = 'final') => ({ id, author: { role: 'assistant' },
+      create_time: at, channel, status: 'finished_successfully', end_turn: channel === 'final',
+      content: { content_type: 'text', parts: [text] }, metadata: {} });
+    await h.feed({
+      conversation_id: conversationId,
+      current_node: staleA,
+      mapping: {
+        root: { id: 'root', parent: null, children: [u1], message: null },
+        [u1]: { id: u1, parent: 'root', children: [a1], message: user(u1, 'COS-PC-TEST-1', 100) },
+        [a1]: { id: a1, parent: u1, children: [staleU, mobileU], message: assistant(a1, 'COS-PC-TEST-1 confirmed', 101) },
+        [staleU]: { id: staleU, parent: a1, children: [staleA], message: user(staleU, 'older branch', 102) },
+        [staleA]: { id: staleA, parent: staleU, children: [], message: assistant(staleA, 'older answer', 103) },
+        [mobileU]: { id: mobileU, parent: a1, children: [mobileA], message: user(mobileU, 'MOBILE-TEST-1', 110) },
+        [mobileA]: { id: mobileA, parent: mobileU, children: [privateA], message: assistant(mobileA, 'MOBILE-TEST-1 confirmed', 111) },
+        [privateA]: { id: privateA, parent: mobileA, children: [], message: assistant(privateA, 'private chain of thought', 112, 'analysis') }
+      }
+    }, `https://chatgpt.com/backend-api/conversation/${conversationId}`);
+    const transcript = h.posts.find(row => row.type === 'cos-server-transcript');
+    expect(transcript).toMatchObject({
+      conversationId,
+      leafId: privateA,
+      userLineage: [u1, mobileU],
+      messages: [
+        { role: 'user', messageId: u1, text: 'COS-PC-TEST-1' },
+        { role: 'assistant', messageId: a1, providerMessageId: a1, text: 'COS-PC-TEST-1 confirmed', final: true },
+        { role: 'user', messageId: mobileU, text: 'MOBILE-TEST-1' },
+        { role: 'assistant', messageId: mobileA, providerMessageId: mobileA, text: 'MOBILE-TEST-1 confirmed', final: true }
+      ]
+    });
+    expect(JSON.stringify(transcript)).not.toContain('private chain of thought');
+    expect(JSON.stringify(transcript)).not.toContain('older branch');
+  });
+
 });

@@ -13,6 +13,7 @@
   window.__cosUsageObserver = true;
   const post = window.postMessage.bind(window);
   let latest = null;
+  let latestServerTranscript = null;
   let requestOrder = 0, latestOrder = 0;
   const CONVERSATION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const REQUEST = /^wfr_[a-zA-Z0-9_-]{1,96}$/;
@@ -85,6 +86,144 @@
     } catch { /* Unsupported metadata is unavailable, never guessed. */ }
     finally { clearTimeout(timer); void reader.cancel().catch(() => {}); }
   }
+  const SERVER_TRANSCRIPT_PATH = /^\/backend-api\/(?:f\/)?conversation\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i;
+  const SERVER_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
+  const SERVER_TRANSCRIPT_MESSAGES = 96;
+  const SERVER_TRANSCRIPT_LINEAGE = 512;
+  const SERVER_TRANSCRIPT_TEXT = 256_000;
+  const SERVER_TRANSCRIPT_TOTAL_TEXT = 1024 * 1024;
+
+  function serverAuthoredTime(message) {
+    const raw = Number(message?.create_time);
+    if (!Number.isFinite(raw) || raw <= 0) return null;
+    return Math.round(raw < 10_000_000_000 ? raw * 1000 : raw);
+  }
+  function serverText(message) {
+    const content = message?.content;
+    if (!content || typeof content !== 'object') return '';
+    let parts = [];
+    if (content.content_type === 'text' && Array.isArray(content.parts)) parts = content.parts;
+    else if (content.content_type === 'multimodal_text' && Array.isArray(content.parts)) parts = content.parts;
+    else return '';
+    let value = '';
+    for (const part of parts) {
+      if (typeof part !== 'string') continue;
+      if (value) value += '\n';
+      value += part;
+      if (value.length >= SERVER_TRANSCRIPT_TEXT) break;
+    }
+    return value.slice(0, SERVER_TRANSCRIPT_TEXT);
+  }
+  function publicServerMessage(message) {
+    if (!message || typeof message !== 'object') return null;
+    const id = typeof message.id === 'string' && /^[a-zA-Z0-9:_-]{1,200}$/.test(message.id) ? message.id : null;
+    const role = message.author?.role;
+    if (!id || (role !== 'user' && role !== 'assistant')) return null;
+    const metadata = message.metadata && typeof message.metadata === 'object' ? message.metadata : null;
+    if (metadata?.is_visually_hidden_from_conversation === true || metadata?.is_visually_hidden === true) return null;
+    if (role === 'assistant') {
+      if (message.channel === 'analysis' || metadata?.channel === 'analysis') return null;
+      // Cross-device sync needs the settled public answer, not private/interim narration.
+      if (message.end_turn !== true || (message.status && message.status !== 'finished_successfully')) return null;
+    }
+    const text = serverText(message);
+    if (!text) return null;
+    const createTime = serverAuthoredTime(message);
+    return {
+      role,
+      messageId: id,
+      ...(role === 'assistant' ? { providerMessageId: id, final: true } : {}),
+      text,
+      ...(createTime ? { createTime } : {})
+    };
+  }
+  function projectServerTranscript(data, conversationId, observedAt) {
+    if (!data || typeof data !== 'object' || !CONVERSATION.test(conversationId)) return;
+    const claimed = typeof data.conversation_id === 'string' ? data.conversation_id :
+      typeof data.id === 'string' ? data.id : null;
+    if (claimed && claimed !== conversationId) return;
+    const raw = data.mapping;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+    const entries = Object.entries(raw);
+    if (entries.length === 0 || entries.length > 10000) return;
+    const nodes = new Map();
+    for (const [key, value] of entries) {
+      if (!value || typeof value !== 'object') continue;
+      const id = typeof value.id === 'string' ? value.id : key;
+      if (typeof id !== 'string' || id.length > 200) continue;
+      const parent = typeof value.parent === 'string' && value.parent.length <= 200 ? value.parent : null;
+      const children = Array.isArray(value.children)
+        ? value.children.filter(child => typeof child === 'string' && child.length <= 200).slice(0, 64)
+        : [];
+      nodes.set(id, { id, parent, children, message: value.message });
+    }
+    if (nodes.size === 0) return;
+    const leaves = [...nodes.values()].filter(node => !node.children.some(child => nodes.has(child)));
+    if (leaves.length === 0) return;
+    const currentNode = typeof data.current_node === 'string' && nodes.has(data.current_node) ? data.current_node : null;
+    let best = null;
+    for (const leaf of leaves.slice(0, 2000)) {
+      const chain = [];
+      const seen = new Set();
+      let at = leaf;
+      while (at && !seen.has(at.id) && chain.length < 5000) {
+        seen.add(at.id); chain.push(at);
+        at = at.parent ? nodes.get(at.parent) : null;
+      }
+      chain.reverse();
+      const publicRows = [];
+      let latestAt = 0;
+      for (const node of chain) {
+        const projected = publicServerMessage(node.message);
+        if (!projected) continue;
+        publicRows.push(projected);
+        latestAt = Math.max(latestAt, projected.createTime || 0);
+      }
+      if (!publicRows.length) continue;
+      const preferred = currentNode === leaf.id ? 1 : 0;
+      if (!best || latestAt > best.latestAt || (latestAt === best.latestAt && preferred > best.preferred))
+        best = { leafId: leaf.id, rows: publicRows, latestAt, preferred };
+    }
+    if (!best) return;
+    const userLineage = best.rows.filter(row => row.role === 'user').map(row => row.messageId).slice(-SERVER_TRANSCRIPT_LINEAGE);
+    const messages = [];
+    let textBudget = SERVER_TRANSCRIPT_TOTAL_TEXT;
+    for (let index = best.rows.length - 1; index >= 0 && messages.length < SERVER_TRANSCRIPT_MESSAGES && textBudget > 0; index--) {
+      const row = best.rows[index];
+      const text = row.text.length <= textBudget ? row.text : row.text.slice(0, textBudget);
+      if (!text) break;
+      messages.push({ ...row, text });
+      textBudget -= text.length;
+    }
+    messages.reverse();
+    if (!messages.length || !userLineage.length) return;
+    latestServerTranscript = {
+      type: 'cos-server-transcript', conversationId, observedAt,
+      leafId: best.leafId, userLineage, messages
+    };
+    post(latestServerTranscript, location.origin);
+  }
+  async function inspectServerTranscript(response, observedAt) {
+    let url;
+    try { url = new URL(response.url); } catch { return; }
+    if (url.origin !== location.origin) return;
+    const match = url.pathname.match(SERVER_TRANSCRIPT_PATH);
+    if (!match || !response.ok || !response.headers.get('content-type')?.includes('application/json')) return;
+    const copy = response.clone(), reader = copy.body?.getReader();
+    if (!reader) return;
+    const timer = setTimeout(() => void reader.cancel().catch(() => {}), 15000);
+    let bytes = 0, text = ''; const decoder = new TextDecoder();
+    try {
+      while (true) {
+        const { done, value } = await reader.read(); if (done) break;
+        bytes += value.byteLength; if (bytes > SERVER_TRANSCRIPT_BYTES) return;
+        text += decoder.decode(value, { stream: true });
+      }
+      projectServerTranscript(JSON.parse(text + decoder.decode()), match[1], observedAt);
+    } catch { /* Server transcript projection is opportunistic; the page remains authoritative. */ }
+    finally { clearTimeout(timer); void reader.cancel().catch(() => {}); }
+  }
+
   /**
    * Reads bounded complete SSE events from a clone without changing the page's response.
    * Only a conversation id and server request metadata from the same event are projected.
@@ -220,6 +359,7 @@
           method = String(explicit || inherited || 'GET').toUpperCase();
         } catch { return; }
         if (method === 'POST') void inspectRequestOrigins(response, observedAt).catch(() => {});
+        else if (method === 'GET') void inspectServerTranscript(response, observedAt).catch(() => {});
       }).catch(() => {});
       return result;
     };
@@ -237,6 +377,7 @@
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.origin !== location.origin || event.data?.type !== 'cos-usage-request') return;
     if (latest) post(latest, location.origin);
+    if (latestServerTranscript) post(latestServerTranscript, location.origin);
     // Newest first: old evidence must not fill content's 16-ID pending capacity
     // before the current workflow can enter it during document startup.
     for (const { conversationId, requestId, observedAt } of [...origins.values()].slice(-16).reverse())

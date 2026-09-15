@@ -643,12 +643,70 @@
     return true;
   }
 
+  function applyServerTranscript(data) {
+    if (!data || typeof data !== 'object') return false;
+    const claimed = typeof data.conversationId === 'string' ? data.conversationId : '';
+    const route = CLF_DOM.conversationId();
+    if (!claimed || claimed !== route || claimed !== conversationId) return false;
+    const lineage = Array.isArray(data.userLineage) ? data.userLineage : [];
+    const messages = Array.isArray(data.messages) ? data.messages : [];
+    if (!lineage.length || lineage.length > 512 || !messages.length || messages.length > 96) return false;
+    let latestAnchor = null;
+    for (const anchor of userAnchorByMessage.values()) {
+      if (!anchor || !Number.isFinite(Number(anchor.seq)) || Number(anchor.seq) < 0 || !anchor.messageId) continue;
+      if (!latestAnchor || Number(anchor.seq) > Number(latestAnchor.seq)) latestAnchor = anchor;
+    }
+    if (!latestAnchor) {
+      pendingServerTranscript = data;
+      return false;
+    }
+    const lineageSet = new Set(lineage.filter(id => typeof id === 'string' && /^[a-zA-Z0-9:_-]{1,200}$/.test(id)));
+    // A newer sibling branch must never be flattened into this local session. Sync only a
+    // server branch that still contains the newest user boundary this session already owns.
+    if (!lineageSet.has(latestAnchor.messageId)) return false;
+    let start = 0;
+    for (let index = 0; index < messages.length; index++) {
+      if (messages[index]?.role === 'user' && messages[index]?.messageId === latestAnchor.messageId) start = index + 1;
+    }
+    let emitted = 0;
+    for (let index = start; index < messages.length; index++) {
+      const row = messages[index];
+      if (!row || (row.role !== 'user' && row.role !== 'assistant')) continue;
+      const messageId = typeof row.messageId === 'string' && /^[a-zA-Z0-9:_-]{1,200}$/.test(row.messageId) ? row.messageId : null;
+      const text = typeof row.text === 'string' ? row.text.slice(0, 256_000) : '';
+      if (!messageId || !text) continue;
+      if (row.role === 'user' && userAnchorByMessage.has(messageId)) continue;
+      const createTime = Number(row.createTime);
+      const signature = `${claimed}\u0000${row.role}\u0000${messageId}\u0000${Number.isFinite(createTime) ? createTime : 0}\u0000${text}`;
+      if (serverTranscriptSeen.has(signature)) continue;
+      serverTranscriptSeen.add(signature);
+      if (serverTranscriptSeen.size > 512) serverTranscriptSeen.delete(serverTranscriptSeen.values().next().value);
+      if (row.role === 'user') {
+        emit({ kind: 'user_message', messageId, text,
+          ...(Number.isFinite(createTime) && createTime > 0 ? { time: createTime, authoredTime: true } : {}) });
+      } else {
+        const providerMessageId = typeof row.providerMessageId === 'string' && /^[a-zA-Z0-9:_-]{1,200}$/.test(row.providerMessageId)
+          ? row.providerMessageId : messageId;
+        emit({ kind: 'assistant_message', messageId, providerMessageId, text, state: 'final', final: true,
+          ...(Number.isFinite(createTime) && createTime > 0 ? { time: createTime, authoredTime: true } : {}) });
+      }
+      emitted += 1;
+    }
+    pendingServerTranscript = null;
+    return emitted > 0;
+  }
+  function applyPendingServerTranscript() {
+    if (pendingServerTranscript) applyServerTranscript(pendingServerTranscript);
+  }
+
   /** The app is holding this exact revision. Kept, rather than dropped, as a settled key. */
   function settlePresentation() {
     if (pendingPresentation) pendingPresentation.until = 0;
   }
   /** Stable user-message id → durable event position, used only to anchor page responses. */
   const userAnchorByMessage = new Map();
+  const serverTranscriptSeen = new Set();
+  let pendingServerTranscript = null;
   /**
    * The newest user message this document has already opened a turn for.
    *
@@ -5835,6 +5893,7 @@
         if (!Number.isFinite(seq) || !messageId) continue;
         userAnchorByMessage.set(messageId, { seq, time: Number(anchor.time) || 0, messageId });
       }
+      applyPendingServerTranscript();
       if (userAnchorByMessage.size > 2000) {
         const oldest = [...userAnchorByMessage.values()]
           .sort((a, b) => Number(a.seq) - Number(b.seq))
@@ -10174,6 +10233,10 @@
   }
 
   let lastUsageProjection = '';
+  window.addEventListener('message', (event) => {
+    if (!alive || event.source !== window || event.origin !== location.origin || event.data?.type !== 'cos-server-transcript') return;
+    applyServerTranscript(event.data);
+  });
   window.addEventListener('message', (event) => {
     if (!alive || event.source !== window || event.origin !== location.origin || event.data?.type !== 'cos-usage') return;
     const rows = event.data.rows;
