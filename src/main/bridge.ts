@@ -7066,7 +7066,7 @@ async function takePendingRepairs(
       repair.state = 'handed';
       repair.token = randomBytes(9).toString('base64url');
       if (repair.reason !== 'sync') {
-        await updateRepairProgress(conversationId, repair, `Trying to reload chat to recover ${repairReason(repair)}?`);
+        await updateRepairProgress(conversationId, repair, `Trying to reload chat to recover ${repairReason(repair)}…`);
       }
     }
     // A missed pre-action claim may retry the same offer. Once claimed, ambiguous
