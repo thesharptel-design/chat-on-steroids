@@ -190,6 +190,7 @@ const api = {
   setInputAutomation: (id: string, mode: 'off' | 'goal' | 'loop', loopAfterTurn?: boolean) => call<boolean>('sessions:inputAutomation', { id, mode, loopAfterTurn }),
   setZoom: (factor: number) => call<number>('window:zoom', { factor }),
   getZoom: () => call<number>('window:getZoom'),
+  syncSession: (id: string) => call<{ queued: boolean; conversationId: string }>('sessions:sync', { id }),
   openSessionChat: (id: string) => call<boolean>('sessions:openChat', { id }),
   // Stops a chat this app cannot stop in the page: every tool call it has already been proved
   // to own is refused until it is released. Returns the whole blocked set, so one press

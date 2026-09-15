@@ -1568,12 +1568,15 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     // mean the last repair did not happen. Empty, which is almost always, costs one request.
     const repaired = url.searchParams.get('repaired');
     const repairFailed = url.searchParams.get('repairFailed');
+    const repairDeferred = url.searchParams.get('repairDeferred');
     const repairAction = url.searchParams.get('repairAction');
     const action = repairAction === 'reloaded' || repairAction === 'reopened' ? repairAction : null;
     if (repaired) {
       await confirmRepair(repaired.slice(0, 64), action);
     } else if (repairFailed) {
       await failRepairAttempt(repairFailed.slice(0, 64), action);
+    } else if (repairDeferred) {
+      deferRepairAttempt(repairDeferred.slice(0, 64));
     }
     const revival = pendingBrowserRevival();
     const inputRows = await listInputs();
@@ -1601,7 +1604,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         placement: pendingBrowserPlacement(null),
         // A failure report closes this request. Reissuing the repair in the same response would
         // replace the visible failure with "Trying" before a renderer could ever observe it.
-        repairs: repairFailed ? [] : await takePendingRepairs(),
+        repairs: repairFailed || repairDeferred ? [] : await takePendingRepairs(),
         ...tabPolicy,
         recoveryMonitoring: browserRecoveryMonitoring()
       },
@@ -5686,7 +5689,7 @@ interface Repair {
   state: 'queued' | 'handed' | 'done';
   /** Stable identity of the failure/inactivity episode. A new activity stamp mints a new one. */
   episode: string;
-  reason: 'unattributed' | 'assistant-error' | 'no-tab' | 'silence' | 'goal' | 'compaction';
+  reason: 'unattributed' | 'assistant-error' | 'no-tab' | 'silence' | 'goal' | 'compaction' | 'sync';
   /** Cooldown boundary. The browser is never asked before this instant. */
   notBefore: number;
   /**
@@ -5825,7 +5828,7 @@ function queueBrowserRecovery(
   // floor for two and a half minutes because a silence reopen had landed moments earlier. One
   // close is one reopen, and it is immediate.
   const notBefore =
-    reason === 'silence' || reason === 'goal' || reason === 'compaction' || reason === 'no-tab' || reason === 'unattributed'
+    reason === 'silence' || reason === 'goal' || reason === 'compaction' || reason === 'no-tab' || reason === 'unattributed' || reason === 'sync'
       ? now
       : Math.max(now, (lastBrowserRecoveryAt.get(conversationId) ?? 0) + BROWSER_RECOVERY_COOLDOWN_MS);
   const repair: Repair = {
@@ -5865,6 +5868,33 @@ function queueBrowserRecovery(
     }).catch((error: Error) => logWarn(`bridge: could not start browser for ${reason} recovery: ${error.message}`));
   }
   return true;
+}
+
+/**
+ * Ask the companion to re-open the exact server-backed ChatGPT conversation once it is safe.
+ *
+ * This intentionally does not call ChatGPT's private backend API. The browser is already the
+ * authenticated owner of the conversation, so a normal reload lets ChatGPT fetch its current
+ * server transcript and the recorder merges the resulting canonical message ids. Local-only
+ * tool/worker events never participate in that merge.
+ */
+export async function requestSessionSync(sessionId: string): Promise<{ queued: boolean; conversationId: string }> {
+  const session = await getSession(sessionId);
+  const id = session?.conversationId;
+  if (!id || !conversationId(id)) throw new Error('This session is not attached to a ChatGPT conversation');
+  if (isChatBlocked(id)) throw new Error('Release this blocked chat before syncing it');
+  const held = repairsInFlight.get(id);
+  if (held && held.state !== 'done') {
+    if (held.reason === 'sync') { wakeBrowserWork(); return { queued: true, conversationId: id }; }
+    return { queued: false, conversationId: id };
+  }
+  const live = liveConversations().find(entry => entry.conversationId === id);
+  const queued = queueBrowserRecovery(id, sessionId, `sync:${Date.now()}`, 'sync', live?.endedTurns ?? 0);
+  if (queued) {
+    logInfo(`bridge: sync requested for ChatGPT conversation ${id}`);
+    wakeBrowserWork();
+  }
+  return { queued, conversationId: id };
 }
 
 /**
@@ -6967,7 +6997,7 @@ async function tickUnattributedIncident(): Promise<void> {
  */
 async function takePendingRepairs(
   now = Date.now()
-): Promise<Array<{ conversationId: string; token: string; reason: Repair['reason']; focus: boolean }>> {
+): Promise<Array<{ conversationId: string; token: string; reason: Repair['reason']; focus: boolean; safeOnly?: boolean }>> {
   retireSpentRepairs();
   const pickupFloor = goalWatchFloor;
   const owed = await owedPickups(now);
@@ -7025,6 +7055,8 @@ async function takePendingRepairs(
     /** Raise the tab (or open the chat in front) before acting: a background tab is throttled. */
     focus: boolean;
     requiresClaim?: boolean;
+    /** Sync must never reload a generating chat or discard an unsent browser draft. */
+    safeOnly?: boolean;
   }> = [];
   for (const [conversationId, repair] of repairsInFlight) {
     const unclaimedError = repair.reason === 'assistant-error' && repair.state === 'handed' && !repair.claimed;
@@ -7033,7 +7065,9 @@ async function takePendingRepairs(
     if (!unclaimedError) {
       repair.state = 'handed';
       repair.token = randomBytes(9).toString('base64url');
-      await updateRepairProgress(conversationId, repair, `Trying to reload chat to recover ${repairReason(repair)}…`);
+      if (repair.reason !== 'sync') {
+        await updateRepairProgress(conversationId, repair, `Trying to reload chat to recover ${repairReason(repair)}?`);
+      }
     }
     // A missed pre-action claim may retry the same offer. Once claimed, ambiguous
     // acknowledgement keeps custody and cannot authorize a second browser action.
@@ -7051,6 +7085,7 @@ async function takePendingRepairs(
         !stopRequestedFor(conversationId))
       {
         ready.push({ conversationId, token: repair.token, reason: repair.reason, focus: repair.reason === 'compaction',
+          ...(repair.reason === 'sync' ? { safeOnly: true } : {}),
           ...(repair.attribution || repair.reason === 'assistant-error' ? { requiresClaim: true } : {}) });
       }
   }
@@ -7099,8 +7134,10 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | nu
       repair.state = 'done';
       if (repair.attribution && repair.attribution.incident.firstAttemptAt === null)
         repair.attribution.incident.firstAttemptAt = Date.now();
-      lastBrowserRecoveryAt.set(conversationId, Date.now());
-      awaitingReturn.add(conversationId);
+      if (repair.reason !== 'sync') {
+        lastBrowserRecoveryAt.set(conversationId, Date.now());
+        awaitingReturn.add(conversationId);
+      }
       if (repair.reason === 'silence') {
         const failedGrant = activeUntil.get(conversationId);
         if (failedGrant?.thinkingFailed) failedGrant.until = Date.now() + 5 * 60_000;
@@ -7135,13 +7172,29 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | nu
         if (repair.assistantSource) turnRepairSpent.set(conversationId,
           { sessionId: repair.sessionId, turnKey: repair.assistantSource.key });
       }
-      await updateRepairProgress(
-        conversationId,
-        repair,
-        `${action === 'reopened' ? 'Reopened' : 'Reloaded'} chat to recover ${repairReason(repair)}.`
-      );
+      if (repair.reason === 'sync') {
+        logInfo(`bridge: ChatGPT conversation ${conversationId} reloaded to sync server turns`);
+      } else {
+        await updateRepairProgress(
+          conversationId,
+          repair,
+          `${action === 'reopened' ? 'Reopened' : 'Reloaded'} chat to recover ${repairReason(repair)}.`
+        );
+      }
       return;
     }
+  }
+}
+
+/** A safe-only sync found live work or an unsent draft. Retry later without calling it a failure. */
+function deferRepairAttempt(token: string): void {
+  for (const [conversationId, repair] of repairsInFlight) {
+    if (repair.reason !== 'sync' || repair.state !== 'handed' || repair.token !== token) continue;
+    repair.state = 'queued';
+    repair.notBefore = Date.now() + 30_000;
+    repairsInFlight.delete(conversationId);
+    repairsInFlight.set(conversationId, repair);
+    return;
   }
 }
 
@@ -7149,11 +7202,15 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | nu
 async function failRepairAttempt(token: string, action: 'reloaded' | 'reopened' | null): Promise<void> {
   for (const [conversationId, repair] of repairsInFlight) {
     if (repair.state !== 'handed' || repair.token !== token) continue;
-    await updateRepairProgress(
-      conversationId,
-      repair,
-      `${action === 'reopened' ? 'Reopen' : 'Reload'} failed while recovering ${repairReason(repair)}${repair.attribution ? '.' : '; will retry.'}`
-    );
+    if (repair.reason !== 'sync') {
+      await updateRepairProgress(
+        conversationId,
+        repair,
+        `${action === 'reopened' ? 'Reopen' : 'Reload'} failed while recovering ${repairReason(repair)}${repair.attribution ? '.' : '; will retry.'}`
+      );
+    } else {
+      logWarn(`bridge: ChatGPT sync reload failed for ${conversationId}; will retry`);
+    }
     if (repairsInFlight.get(conversationId) !== repair) return;
     if (repair.reason === 'unattributed') repair.state = 'done';
     else {
@@ -7173,7 +7230,8 @@ function repairReason(repair: Repair): string {
     'no-tab': 'a missing browser tab',
     silence: 'an unresponsive open turn',
     goal: 'a goal reply nothing collected',
-    compaction: 'an uncollected compaction ticket'
+    compaction: 'an uncollected compaction ticket',
+    sync: 'a server transcript sync'
   }[repair.reason];
 }
 

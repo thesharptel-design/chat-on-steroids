@@ -62,7 +62,7 @@ import {
   bridgeStatus,
   sessionActivityExpiresAt,
   sessionInputActivity,
-  sessionControlsFor, stopSessionTurn, setSessionAutomation, setSessionObjective, compactSession, cancelSessionCompaction,
+  sessionControlsFor, stopSessionTurn, setSessionAutomation, setSessionObjective, compactSession, cancelSessionCompaction, requestSessionSync,
   cancelWorkerCommands,
   chatUrl,
   onBridgeChange,
@@ -911,6 +911,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     getWindow()?.webContents.setZoomFactor(factor * UI_BASE_ZOOM);
     return factor;
   });
+
+  handle('sessions:sync', async (payload) => requestSessionSync(sessionIdArg.parse(payload).id));
 
   handle('sessions:openChat', async (payload) => {
     const { id } = sessionIdArg.parse(payload);

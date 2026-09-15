@@ -2384,7 +2384,7 @@ async function maintainOnce() {
 }
 
 async function performBrowserRepairs(repairs, policy) {
-  for (const { conversationId, token, focus, requiresClaim } of repairs) {
+  for (const { conversationId, token, focus, requiresClaim, safeOnly } of repairs) {
     // Re-scanned per repair rather than reused from above. Earlier entries in this same batch
     // may have created a tab, and the scan has to be the state immediately before the action or
     // the duplicate rule below is deciding on a tab list that no longer exists.
@@ -2404,6 +2404,13 @@ async function performBrowserRepairs(repairs, policy) {
     const repairAction = target ? 'reloaded' : 'reopened';
     try {
       if (!target && policy.browserOnly === true) continue;
+      if (target && safeOnly) {
+        const proof = await tabReply(target.id, { type: 'clf-tab-close-check', conversationId });
+        if (!proof || proof.safe !== true || proof.conversationId !== conversationId) {
+          await call(`/status?repairDeferred=${encodeURIComponent(token)}`);
+          continue;
+        }
+      }
       // Select the working tab within Chrome without stealing OS focus from the
       // desktop app. Tab selection and window activation are separate operations.
       if (target && focus) {

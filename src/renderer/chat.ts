@@ -3057,6 +3057,27 @@ export function chatVisible(next: boolean): void {
   }
 }
 
+const CHATGPT_SYNC_COOLDOWN_MS = 30_000;
+let lastChatGptSyncAt = 0;
+let syncInFlight = false;
+
+async function syncSelectedFromChatGPT(manual = false): Promise<void> {
+  const id = selectedId;
+  const summary = id ? sessions.find(row => row.id === id) : null;
+  if (!id || !summary?.conversationId || syncInFlight) return;
+  const now = Date.now();
+  if (!manual && now - lastChatGptSyncAt < CHATGPT_SYNC_COOLDOWN_MS) return;
+  lastChatGptSyncAt = now;
+  syncInFlight = true;
+  try {
+    const result = await run(api.syncSession(id));
+    if (manual && result && !result.queued) toast(t("This chat is busy with another recovery. Try sync again shortly."));
+    else if (manual && result?.queued) toast(t("Refreshing this conversation from ChatGPT?"));
+  } finally {
+    syncInFlight = false;
+  }
+}
+
 async function refreshAll(): Promise<void> {
   await loadSessions();
   const swarmNow = await run(api.getSwarm());
@@ -3491,6 +3512,7 @@ function selectSession(id: string): void {
   paintSessions();
   void loadDetail();
   void refreshInputQueue();
+  void syncSelectedFromChatGPT();
 }
 
 function selectNewChat(projectId: string | null = null): void {
@@ -3822,7 +3844,9 @@ export function initChat(next: Deps): void {
     paintDetail();
   });
 
-  $('chatRefresh').addEventListener('click', () => void refreshAll());
+  $('chatRefresh').addEventListener('click', () => { void syncSelectedFromChatGPT(true); void refreshAll(); });
+  window.addEventListener('focus', () => { if (visible) void syncSelectedFromChatGPT(); });
+  document.addEventListener('visibilitychange', () => { if (visible && document.visibilityState === 'visible') void syncSelectedFromChatGPT(); });
 
   $('copyHandoff').addEventListener('click', async () => {
     if (!handoff) return;
