@@ -88,7 +88,7 @@ function paintProUsageStatus(): void {
     }
     if (proUsage.exhausted) detail = `${t("Limit reached")} - ${detail}`;
   }
-  node.textContent = `GPT-6 Pro / Astra ? ${detail}${reset ? ` - ${t("Resets {0}", [reset])}` : ''}`;
+  node.textContent = `GPT-6 Pro / Astra · ${detail}${reset ? ` ? ${t("Resets {0}", [reset])}` : ''}`;
   node.hidden = false;
 }
 function paintUnavailableModels(): void {
