@@ -71,6 +71,31 @@ describe('passive usage limits and canonical token totals', () => {
     now += 1001;
     expect((await usage.usageOverview()).limits).toEqual([]);
   });
+  it('treats a quota-disabled GPT-6 Pro with a future reset as exact zero remaining', async () => {
+    catalog.getChatModels.mockReturnValue({ models: [{ id: 'gpt-6-pro', efforts: ['pro'], unavailableEfforts: ['pro'] }] });
+    const resetAt = now + 7 * 24 * 60 * 60 * 1000;
+    usage.observeUsage([limit({ model: 'gpt-6-pro', scope: 'model', remaining: null, remainingPercent: null, resetAt })], now);
+    expect((await usage.usageOverview()).proChat).toMatchObject({
+      remaining: 0, exact: true, exhausted: true, source: 'provider', resetAt
+    });
+  });
+  it('counts one local Pro request once and an external Pro final once for manual allowance estimates', async () => {
+    const config = await import('../src/main/config.js');
+    config.getConfig().ui.proChatAllowance = 'pro-200';
+    catalog.getChatModels.mockReturnValue({ models: [{ id: 'gpt-6-pro', efforts: ['pro'] }] });
+    const resetAt = now + 7 * 24 * 60 * 60 * 1000;
+    usage.observeUsage([limit({ model: 'gpt-6-pro', scope: 'model', remaining: null, remainingPercent: null, resetAt })], now);
+    store.listUsageSessions.mockResolvedValue([{ id: 'one', updatedAt: 1, events: 4, estimatedTokens: 0 }]);
+    store.readEvents.mockResolvedValue([
+      { kind: 'user_message', time: now, messageId: 'local-user', model: 'gpt-6-pro', reasoningEffort: 'pro', message: { text: 'local' } },
+      { kind: 'assistant_message', time: now + 1, messageId: 'local-answer', providerMessageId: 'local-answer', model: 'gpt-6-pro', reasoningEffort: 'pro', final: true, message: { text: 'done' } },
+      { kind: 'user_message', time: now + 2, messageId: 'mobile-user', message: { text: 'mobile' } },
+      { kind: 'assistant_message', time: now + 3, messageId: 'mobile-answer', providerMessageId: 'mobile-answer', model: 'gpt-6-pro', reasoningEffort: 'pro', final: true, message: { text: 'done' } }
+    ]);
+    expect((await usage.usageOverview()).proChat).toMatchObject({
+      profile: 'pro-200', cap: 200, used: 2, trackedMessages: 2, remaining: 198, exact: false, source: 'local'
+    });
+  });
   it('recomputes changed session revisions and removes deleted sessions from daily totals', async () => {
     const time = new Date(2026, 8, 5, 12).getTime();
     store.listUsageSessions.mockResolvedValue([{ id: 'one', updatedAt: 1, events: 1, estimatedTokens: 1 }]);
@@ -201,7 +226,7 @@ describe('passive usage limits and canonical token totals', () => {
     expect(await usage.usageOverview()).toMatchObject({ contextTokenCap: 256_000, tokens: 128_000 });
     expect(store.readEvents).toHaveBeenCalledTimes(1);
   });
-  it.each([4, 5, 6])('rebuilds old cache version %i and reuses the corrected cache after restart', async (version) => {
+  it.each([4, 5, 6, 7])('rebuilds old cache version %i and reuses the corrected cache after restart', async (version) => {
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     durable.readDurable.mockResolvedValue({ version, rows: [{ id: 'one', revision: `${timezone}:1:1:2000000`, days: [['2026-09-05', [{ model: 'gpt-6-pro', reasoningEffort: null, assumed: false, tokens: 1_000_000 }]]] }] });
     store.listUsageSessions.mockResolvedValue([{ id: 'one', updatedAt: 1, events: 1, estimatedTokens: 2_000_000 }]);
@@ -209,7 +234,7 @@ describe('passive usage limits and canonical token totals', () => {
     expect((await usage.usageOverview()).tokens).toBe(128_000);
     expect(store.readEvents).toHaveBeenCalledTimes(1);
     const persisted = durable.writeDurableSoon.mock.calls.at(-1)![1];
-    expect(persisted.version).toBe(7);
+    expect(persisted.version).toBe(8);
     vi.resetModules(); durable.readDurable.mockResolvedValue(persisted); store.readEvents.mockClear();
     usage = await import('../src/main/session/usage.js');
     expect((await usage.usageOverview()).tokens).toBe(128_000);

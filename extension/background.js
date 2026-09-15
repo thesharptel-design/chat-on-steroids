@@ -2673,7 +2673,8 @@ const HANDLERS = {
   },
   async usage_observation(message, _sender, source) {
     if (!ownsDocument(source) || !Array.isArray(message.rows) || message.rows.length > 80) return { ok: false };
-    const body = JSON.stringify({ rows: message.rows, observedAt: message.observedAt });
+    const plan = typeof message.plan === 'string' && /^[a-zA-Z0-9_. /-]{1,100}$/.test(message.plan) ? message.plan : undefined;
+    const body = JSON.stringify({ rows: message.rows, observedAt: message.observedAt, ...(plan ? { plan } : {}) });
     if (body.length > 24000) return { ok: false };
     return call('/usage', { method: 'POST', body });
   },

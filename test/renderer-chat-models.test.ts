@@ -368,3 +368,29 @@ it.each(['5.6', 'gpt-5.6-sol', 'GPT-5.6 Sol', 'gpt-5-6-thinking'])('keeps saved 
   };
   check(); receive({ state: 'ready', models: [...models].reverse() }); check();
 });
+
+it('shows quota-exhausted GPT-6 Pro as disabled with the observed zero and reset', async () => {
+  dom = new JSDOM(await readFile('src/renderer/index.html', 'utf8'));
+  vi.stubGlobal('window', dom.window); vi.stubGlobal('document', dom.window.document);
+  const resetAt = Date.parse('2026-09-20T00:00:00Z');
+  const models = [
+    { id: 'gpt-5-6-thinking', label: 'GPT-5.6 Sol', efforts: ['high'] },
+    { id: 'gpt-6-pro', label: 'GPT-6 Pro', efforts: ['pro'], aliases: ['gpt-6-pro'], unavailableEfforts: ['pro'] }
+  ];
+  const proChat = { profile: 'auto', cap: null, used: 0, remaining: 0, resetAt, periodStart: null,
+    exact: true, exhausted: true, source: 'provider', trackedMessages: 0, accountPlan: null };
+  Object.assign(dom.window, { api: {
+    getChatModels: async () => ({ ok: true, data: { state: 'ready', requestedAt: 1, observedAt: 2, models } }),
+    getUsage: async () => ({ ok: true, data: { contextTokenCap: 400000, limits: [], days: [], models: [], tokens: 0, sessions: 0, proChat } })
+  } });
+  const { initChatModels, applyChatModels, confirmedComposerModel } = await import('../src/renderer/chat-models.js');
+  initChatModels(); applyChatModels({ multiAgent: {}, goal: {} } as Config);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(confirmedComposerModel()).toEqual({ model: 'gpt-5-6-thinking', reasoningEffort: 'high' });
+  const disabled = dom.window.document.getElementById('composerUnavailableModels')!;
+  expect(disabled.hidden).toBe(false);
+  expect(disabled.textContent).toContain('GPT-6 Pro');
+  expect(disabled.textContent).toContain('Limit reached');
+  expect(disabled.textContent).toContain('0 remaining');
+  expect([...dom.window.document.querySelectorAll<HTMLOptionElement>('#composerModel option')].map(option => option.value)).not.toContain('gpt-6-pro');
+});

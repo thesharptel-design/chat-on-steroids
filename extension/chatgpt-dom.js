@@ -2085,12 +2085,23 @@ var CLF_DOM = (() => {
     });
   }
   function collectModelChoices(result, state) {
-    for (const choice of state.choices.filter(c => c.available)) {
-      const entry = result.get(choice.familyId) || { id: choice.familyId, label: choice.familyLabel, efforts: [], aliases: [] };
-      if (!entry.efforts.includes(choice.effort)) entry.efforts.push(choice.effort);
+    for (const choice of state.choices) {
+      const unavailablePro = !choice.available && choice.effort === 'pro' && choice.providerLabel === true &&
+        (choice.unavailableKind === 'quota' || choice.unavailableKind === 'unavailable') &&
+        /^(?:gpt-?6-pro|gpt-?5-6-pro)$/i.test(choice.id);
+      if (!choice.available && !unavailablePro) continue;
+      const entry = result.get(choice.familyId) || { id: choice.familyId, label: choice.familyLabel, efforts: [], aliases: [], unavailableEfforts: [] };
+      entry.unavailableEfforts ??= [];
+      const known = entry.efforts.includes(choice.effort);
+      if (!known) entry.efforts.push(choice.effort);
       if (!entry.aliases.includes(choice.id)) entry.aliases.push(choice.id);
+      // Availability may differ across duplicate provider presets. One proven available
+      // execution path wins; an unavailable duplicate can never revoke that proof.
+      if (choice.available) entry.unavailableEfforts = entry.unavailableEfforts.filter(effort => effort !== choice.effort);
+      else if (!known && !entry.unavailableEfforts.includes(choice.effort)) entry.unavailableEfforts.push(choice.effort);
       result.set(choice.familyId, entry);
     }
+    for (const entry of result.values()) if (!entry.unavailableEfforts?.length) delete entry.unavailableEfforts;
   }
   async function inspectModelSettings(stillCurrent = () => true, failure = () => {}) {
     const ui = modelPickerAccess(stillCurrent), original = await ui.open();

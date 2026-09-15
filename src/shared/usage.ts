@@ -1,8 +1,12 @@
+import type { ProChatAllowance } from './types.js';
+
 export interface ModelUsage {
   model: string;
   scope: 'model' | 'feature' | 'shared';
   remaining: number | null;
   remainingPercent: number | null;
+  limit?: number | null;
+  used?: number | null;
   resetAt: number | null;
   windowSeconds: number | null;
   observedAt: number;
@@ -14,10 +18,24 @@ export interface UsageModelTokens {
   assumed: boolean;
   tokens: number;
 }
+export interface ProChatUsage {
+  profile: ProChatAllowance;
+  cap: number | null;
+  used: number;
+  remaining: number | null;
+  resetAt: number | null;
+  periodStart: number | null;
+  exact: boolean;
+  exhausted: boolean;
+  source: 'provider' | 'local' | 'unknown';
+  trackedMessages: number;
+  accountPlan: string | null;
+}
 export interface UsageOverview {
   /** Account-wide comparison ceiling selected from the observed model catalog. */
   contextTokenCap: number;
   limits: ModelUsage[];
+  proChat?: ProChatUsage;
   days: Array<{ date: string; tokens: number; models: UsageModelTokens[] }>;
   models: UsageModelTokens[];
   tokens: number;

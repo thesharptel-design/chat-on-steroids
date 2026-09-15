@@ -670,6 +670,7 @@
                 <h2 class="settings-section-title">ChatGPT models</h2>
                 <div class="pane">
                   <div class="setting"><span class="setting-text"><b>Available ChatGPT models</b><em id="chatModelStatus">Read model choices from your account.</em></span><button class="btn" id="refreshChatModels" type="button">Refresh</button></div>
+                  <div class="setting"><span class="setting-text"><b>Pro Chat allowance</b><em>Used only when ChatGPT reports a reset but not a numeric remaining count. Auto never invents a plan.</em></span><select id="proChatAllowance"><option value="auto">Auto (provider data only)</option><option value="pro-200">Pro $200 (Astra 200/week)</option><option value="shared-50-week">Pro $100 / Business Premium (50/week shared)</option><option value="business-standard-15-month">Business Standard (15/month shared)</option></select></div>
                   <div class="setting"><span class="setting-text"><b>Default sub-agent model</b><em>Confirmed in ChatGPT before a worker starts.</em></span><select id="workerModel"><option value="" disabled>No observed choices</option></select></div>
                   <div class="setting"><span class="setting-text"><b>Default sub-agent reasoning</b><em>Selected independently from the model.</em></span><select id="workerReasoning"><option value="" disabled>No observed choices</option></select></div>
                   </div>
@@ -928,7 +929,7 @@
                   <div class="composer-popover">
                     <div class="power-header"><div class="power-caption"><strong id="composerPowerTitle">Choose a level</strong><span id="composerPowerModel">Observed models</span></div><button class="btn model-reload" id="refreshComposerModels" data-keep-menu="true" type="button" title="Reload ChatGPT models" aria-label="Reload ChatGPT models"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2 5M20 7l-3 3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
                     </div><p id="composerModelStatus" class="muted" role="status" hidden></p>
-                    <div id="composerModelChoices" role="group" aria-label="Model"></div><div id="composerPowerChoices" role="group" aria-label="Thinking effort"></div><label hidden>Model<select id="composerModel" aria-label="ChatGPT model"><option value="" disabled>No observed choices</option></select></label>
+                    <div id="composerModelChoices" role="group" aria-label="Model"></div><div id="composerPowerChoices" role="group" aria-label="Thinking effort"></div><p id="composerProUsage" class="muted pro-usage" hidden></p><div id="composerUnavailableModels" class="unavailable-models" hidden></div><label hidden>Model<select id="composerModel" aria-label="ChatGPT model"><option value="" disabled>No observed choices</option></select></label>
                     <label hidden>Reasoning<select id="composerReasoning" aria-label="Reasoning effort"><option value="" disabled>No observed choices</option></select></label>
                   </div>
                 </details>

@@ -1,6 +1,7 @@
 import { ui, t } from './i18n.js';
 import type { ChatModelCatalog } from '../shared/chat-models.js';
-import { chatModelDisplayLabel } from '../shared/chat-models.js';
+import { chatModelDisplayLabel, isAstraModel } from '../shared/chat-models.js';
+import type { ProChatUsage } from '../shared/usage.js';
 import type { Config } from '../shared/types.js';
 import type { ReasoningEffort } from '../shared/session.js';
 import { $, el, run } from './dom.js';
@@ -11,6 +12,8 @@ let onComposerPaint: (() => void) | undefined;
 const catalogWaiters = new Set<() => void>();
 let discovery: Promise<void> | null = null;
 let catalogSubscribed = false;
+let proUsage: ProChatUsage | null = null;
+let usageRefresh: Promise<void> | null = null;
 type ObservedSelection = { model: string; reasoningEffort?: ReasoningEffort; observedAt: number };
 let composerContext: { scope: string | null; observation: ObservedSelection | null; edited: boolean } | null = null;
 const pairs = [['composerModel', 'composerReasoning'], ['workerModel', 'workerReasoning'], ['helperModel', 'helperReasoning']] as const;
@@ -43,13 +46,74 @@ export function applyComposerSessionModel(scope: string | null, observation: Obs
   paintComposerContext(); paintStatus();
 }
 
+function selectableModels() {
+  return catalog.models
+    .map(model => ({ ...model, efforts: model.efforts.filter(effort => !model.unavailableEfforts?.includes(effort)) }))
+    .filter(model => model.efforts.length > 0);
+}
 /** Provider order and available efforts define the slider, including newly released models. */
 function composerModels() {
-  if (!catalog.models.length) return [];
-  return catalog.models
+  return selectableModels()
     .filter(model => !/^gpt[ -]?5\.5(?:$|[ -])/i.test(model.label))
     .map(model => ({ ...model, efforts: composerEfforts.filter(effort => model.efforts.includes(effort)) }))
     .filter(model => model.efforts.length > 0);
+}
+function formatReset(at: number | null | undefined): string {
+  return at ? new Date(at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+}
+function unavailableDetail(model: ChatModelCatalog['models'][number], effort: ReasoningEffort): string {
+  const astra = effort === 'pro' && (isAstraModel(model.id, effort) || model.aliases?.some(alias => isAstraModel(alias, effort)));
+  if (!astra || !proUsage) return t("Unavailable in ChatGPT");
+  const remaining = proUsage.remaining;
+  const amount = remaining === null ? (proUsage.trackedMessages ? t("{0} Pro messages tracked locally", [proUsage.trackedMessages]) : t("Remaining count not reported"))
+    : proUsage.exact ? t("{0} remaining", [remaining]) : t("~{0} remaining (locally tracked)", [remaining]);
+  const reset = formatReset(proUsage.resetAt);
+  return `${proUsage.exhausted ? t("Limit reached") + ' - ' : ''}${amount}${reset ? ` - ${t("Resets {0}", [reset])}` : ''}`;
+}
+function paintProUsageStatus(): void {
+  const node = document.getElementById('composerProUsage');
+  if (!node) return;
+  const hasAstra = catalog.models.some(model => model.efforts.includes('pro') &&
+    (isAstraModel(model.id, 'pro') || model.aliases?.some(alias => isAstraModel(alias, 'pro'))));
+  if (!hasAstra && !proUsage) { node.hidden = true; node.textContent = ''; return; }
+  const reset = formatReset(proUsage?.resetAt);
+  let detail = t("Remaining count not reported");
+  if (proUsage) {
+    if (proUsage.remaining !== null) {
+      const prefix = proUsage.exact ? '' : '?';
+      detail = `${prefix}${proUsage.remaining.toLocaleString()} ${t("remaining")}${proUsage.cap !== null ? ` / ${proUsage.cap.toLocaleString()}` : ''}`;
+      if (!proUsage.exact) detail += ` (${t("locally tracked")})`;
+    } else if (proUsage.trackedMessages > 0) {
+      detail = t("{0} Pro messages tracked locally. Select your allowance in Settings to estimate remaining.", [proUsage.trackedMessages]);
+    }
+    if (proUsage.exhausted) detail = `${t("Limit reached")} - ${detail}`;
+  }
+  node.textContent = `GPT-6 Pro / Astra ? ${detail}${reset ? ` - ${t("Resets {0}", [reset])}` : ''}`;
+  node.hidden = false;
+}
+function paintUnavailableModels(): void {
+  const root = document.getElementById('composerUnavailableModels');
+  if (!root) return;
+  const rows = catalog.models.flatMap(model => (model.unavailableEfforts ?? [])
+    .filter((effort): effort is ReasoningEffort => composerEfforts.includes(effort as typeof composerEfforts[number]))
+    .map(effort => ({ model, effort })));
+  root.replaceChildren(...rows.map(({ model, effort }) => {
+    const row = el('div', 'unavailable-model'); row.setAttribute('aria-disabled', 'true');
+    row.append(el('strong', '', () => chatModelDisplayLabel(model.label, effort, effortLabel(effort))),
+      el('small', 'muted', () => unavailableDetail(model, effort)));
+    return row;
+  }));
+  root.hidden = rows.length === 0;
+  paintProUsageStatus();
+}
+async function refreshProUsage(): Promise<void> {
+  if (usageRefresh || typeof window.api.getUsage !== 'function') return usageRefresh ?? Promise.resolve();
+  const work = (async () => {
+    const result = await run(window.api.getUsage()).catch(() => null);
+    if (result) { proUsage = result.proChat ?? null; paintUnavailableModels(); }
+  })();
+  usageRefresh = work.finally(() => { usageRefresh = null; });
+  return usageRefresh;
 }
 
 function options(select: HTMLSelectElement, choices: Array<{ id: string; label: string | (() => string) }>, value: string): void {
@@ -77,7 +141,7 @@ function paintPair(modelId: string, effortId: string, modelValue?: string, effor
   const model = document.getElementById(modelId) as HTMLSelectElement | null;
   const effort = document.getElementById(effortId) as HTMLSelectElement | null;
   if (!model || !effort) return;
-  const models = modelId === 'composerModel' ? composerModels() : catalog.models;
+  const models = modelId === 'composerModel' ? composerModels() : selectableModels();
   let nextModel = modelValue ?? model.value;
   let nextEffort = effortValue ?? effort.value;
   nextModel = observedModel(nextModel)?.id ?? nextModel;
@@ -107,6 +171,8 @@ function paintComposerChoices(): void {
   models.dataset.signature = signature;
   models.replaceChildren();
   powers.replaceChildren();
+  paintUnavailableModels();
+  paintProUsageStatus();
   // Order supported levels from Low upwards; never manufacture an unobserved step.
   const steps = choices.flatMap(choice => choice.efforts.map(power => ({
     model: choice.id, modelLabel: choice.label, effort: power, label: () => chatModelDisplayLabel(choice.label, power, effortLabel(power))
@@ -215,6 +281,7 @@ function discoverModels(): Promise<void> {
     catalog = result ?? { ...catalog, state: 'unavailable', error: t("Model discovery could not start.") };
     for (const [modelId, effortId] of pairs) paintPair(modelId, effortId);
     paintComposerContext(); paintStatus();
+    void refreshProUsage();
   })();
   discovery = work.finally(() => { discovery = null; });
   return discovery;
@@ -249,6 +316,7 @@ export function applyChatModels(config: Config, previous?: Config): void {
     for (const [modelId, effortId] of pairs) paintPair(modelId, effortId);
     paintComposerContext();
     paintStatus();
+    void refreshProUsage();
   });
 }
 
@@ -261,10 +329,13 @@ export function initChatModels(onPaint?: () => void): void {
       ++generation; catalog = value;
       for (const [modelId, effortId] of pairs) paintPair(modelId, effortId);
       paintComposerContext(); paintStatus();
+      void refreshProUsage();
     });
   }
   document.getElementById('modelMenu')?.addEventListener('toggle', () => {
-    if (($('modelMenu') as HTMLDetailsElement).open && !catalog.models.length) $('refreshComposerModels').click();
+    if (!($('modelMenu') as HTMLDetailsElement).open) return;
+    if (!catalog.models.length) $('refreshComposerModels').click();
+    void refreshProUsage();
   });
   for (const [modelId, effortId] of pairs) {
     document.getElementById(modelId)?.addEventListener('change', () => {

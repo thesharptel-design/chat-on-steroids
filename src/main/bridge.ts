@@ -1615,7 +1615,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   if (route === '/usage' && req.method === 'POST') {
     try {
       const body = await readBody(req) as Record<string, unknown>;
-      observeUsage(body?.rows, body?.observedAt);
+      observeUsage(body?.rows, body?.observedAt, body?.plan);
       return json(res, 200, { ok: true }, origin);
     } catch { return json(res, 400, { error: 'invalid_usage' }, origin); }
   }

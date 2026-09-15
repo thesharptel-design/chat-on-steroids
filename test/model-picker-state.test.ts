@@ -259,6 +259,15 @@ it('keeps an explicit model denial unavailable even when the preset is visible',
   const f = fixture(); (f.props.modelSwitcherDenialsBySlug as any)['future-model'] = { reason: 'workspace_policy' };
   expect(await f.api.inspectModelSettings()).toEqual([{ id: 'gpt-5-6-thinking', label: 'GPT-5.6 Sol', efforts: ['medium', 'high'], aliases: ['gpt-5-6-thinking'] }]);
 });
+it('keeps an exhausted GPT-6 Pro visible but unavailable without granting selection', async () => {
+  const f = fixture();
+  const pro = f.selections[0]![2]!;
+  pro.availability.status = 'rate_limit_reached';
+  expect(await f.api.inspectModelSettings()).toContainEqual({
+    id: 'gpt-6-pro', label: 'GPT-6 Pro', efforts: ['pro'], aliases: ['gpt-6-pro'], unavailableEfforts: ['pro']
+  });
+  expect(await f.api.selectModelSettings('gpt-6-pro', 'pro')).toBe(false);
+});
 it('observes the September closed 6 Pro selection without opening or changing a working composer', async () => {
   const f = fixture(), doc = page.window.document, trigger = doc.querySelector('button')!;
   const pro = f.selections[0]![2]!;

@@ -687,7 +687,9 @@
       } else {
         const providerMessageId = typeof row.providerMessageId === 'string' && /^[a-zA-Z0-9:_-]{1,200}$/.test(row.providerMessageId)
           ? row.providerMessageId : messageId;
+        const model = typeof row.model === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(row.model) ? row.model : null;
         emit({ kind: 'assistant_message', messageId, providerMessageId, text, state: 'final', final: true,
+          ...(model ? { model } : {}),
           ...(Number.isFinite(createTime) && createTime > 0 ? { time: createTime, authoredTime: true } : {}) });
       }
       emitted += 1;
@@ -10243,9 +10245,10 @@
     if (!Array.isArray(rows) || rows.length > 80) return;
     const observedAt = event.data.observedAt;
     if (!Number.isFinite(observedAt)) return;
-    const encoded = JSON.stringify({ rows, observedAt });
+    const plan = typeof event.data.plan === 'string' && /^[a-zA-Z0-9_. /-]{1,100}$/.test(event.data.plan) ? event.data.plan : null;
+    const encoded = JSON.stringify({ rows, observedAt, plan });
     if (encoded.length > 24000 || encoded === lastUsageProjection) return;
-    void ask({ type: 'usage_observation', rows, observedAt }).then((reply) => { if (reply?.ok) lastUsageProjection = encoded; });
+    void ask({ type: 'usage_observation', rows, observedAt, ...(plan ? { plan } : {}) }).then((reply) => { if (reply?.ok) lastUsageProjection = encoded; });
   });
   function flushStreamRequestOrigins() {
     const route = CLF_DOM.conversationId();

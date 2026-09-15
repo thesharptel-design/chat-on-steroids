@@ -45,14 +45,21 @@
     for (const row of (Array.isArray(metadata.model_limits) ? metadata.model_limits : []).slice(0, 40)) {
       const model = label(row?.model_slug);
       const reset = typeof row?.resets_after === 'string' ? Date.parse(row.resets_after) : NaN;
-      // A reset timestamp alone is not a remaining-message count.
-      const remaining = finite(row?.remaining), resetAt = Number.isFinite(reset) && reset > 0 ? reset : null;
-      if (model && (remaining !== null || resetAt !== null)) add({ model, scope: 'model', remaining, remainingPercent: null, resetAt, windowSeconds: null });
+      // A reset timestamp alone is not a remaining-message count. Use a provider count only
+      // when it actually supplied one; local tracking fills the gap separately.
+      const limit = finite(row?.limit ?? row?.max ?? row?.total ?? row?.message_limit);
+      const used = finite(row?.used ?? row?.usage ?? row?.messages_used);
+      const direct = finite(row?.remaining);
+      const remaining = direct ?? (limit !== null && used !== null ? Math.max(0, limit - used) : null);
+      const resetAt = Number.isFinite(reset) && reset > 0 ? reset : null;
+      if (model && (remaining !== null || resetAt !== null)) add({ model, scope: 'model', remaining, remainingPercent: null, ...(limit !== null ? { limit } : {}), ...(used !== null ? { used } : {}), resetAt, windowSeconds: finite(row?.limit_window_seconds) || null });
     }
     for (const row of (Array.isArray(metadata.limits_progress) ? metadata.limits_progress : []).slice(0, 40)) {
-      const model = label(row?.model_slug), feature = label(row?.feature_name), remaining = finite(row?.remaining);
+      const model = label(row?.model_slug), feature = label(row?.feature_name);
+      const limit = finite(row?.limit ?? row?.max ?? row?.total), used = finite(row?.used ?? row?.usage);
+      const direct = finite(row?.remaining), remaining = direct ?? (limit !== null && used !== null ? Math.max(0, limit - used) : null);
       const reset = typeof row?.reset_after === 'string' ? Date.parse(row.reset_after) : NaN;
-      if ((model || feature) && remaining !== null) add({ model: model || feature, scope: model ? 'model' : 'feature', remaining, remainingPercent: null, resetAt: Number.isFinite(reset) && reset > 0 ? reset : null, windowSeconds: null });
+      if ((model || feature) && remaining !== null) add({ model: model || feature, scope: model ? 'model' : 'feature', remaining, remainingPercent: null, ...(limit !== null ? { limit } : {}), ...(used !== null ? { used } : {}), resetAt: Number.isFinite(reset) && reset > 0 ? reset : null, windowSeconds: null });
     }
     const rates = [{ ...data, label: 'Shared usage' }, ...(Array.isArray(data.additional_rate_limits) ? data.additional_rate_limits.slice(0, 40) : [])];
     for (const rate of rates) {
@@ -64,8 +71,9 @@
         add({ model: name, scope: model ? 'model' : 'shared', remaining: null, remainingPercent: 100 - used, resetAt: reset === null || reset === 0 ? null : reset * 1000, windowSeconds: finite(window?.limit_window_seconds) || null });
       }
     }
+    const plan = label(data?.user_plan_type) || label(data?.plan_type) || label(metadata?.user_plan_type) || label(metadata?.plan_type);
     latestOrder = order;
-    latest = { type: 'cos-usage', rows, observedAt }; post(latest, location.origin);
+    latest = { type: 'cos-usage', rows, observedAt, ...(plan ? { plan } : {}) }; post(latest, location.origin);
   };
   async function inspect(response, observedAt, order) {
     let url;
@@ -129,10 +137,12 @@
     const text = serverText(message);
     if (!text) return null;
     const createTime = serverAuthoredTime(message);
+    const model = role === 'assistant' && typeof metadata?.model_slug === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(metadata.model_slug)
+      ? metadata.model_slug : null;
     return {
       role,
       messageId: id,
-      ...(role === 'assistant' ? { providerMessageId: id, final: true } : {}),
+      ...(role === 'assistant' ? { providerMessageId: id, final: true, ...(model ? { model } : {}) } : {}),
       text,
       ...(createTime ? { createTime } : {})
     };

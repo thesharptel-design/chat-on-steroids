@@ -1885,6 +1885,8 @@ async function recordSupersededMessages(
             : {}),
           messageId: item.messageId,
           state,
+          ...(item.model ? { model: item.model } : {}),
+          ...(item.reasoningEffort ? { reasoningEffort: item.reasoningEffort } : {}),
           ...(item.providerMessageId ? { providerMessageId: item.providerMessageId } : {}),
           final: state === 'final'
         },
@@ -1939,6 +1941,9 @@ async function recordChatObservationsNow(
   );
   if (!sessionId) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
   const live = conversations.get(conversationId);
+  const existing = await getSession(sessionId);
+  let activeSelection = existing?.selectedModel?.conversationId === conversationId
+    ? { model: existing.selectedModel.model, reasoningEffort: existing.selectedModel.reasoningEffort } : null;
   let stored = 0;
   let recoveredGoalSeen = false;
   const goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }> = [];
@@ -1959,7 +1964,10 @@ async function recordChatObservationsNow(
     };
     switch (item.kind) {
       case 'model_selection':
-        if (item.model) await observeSessionModel(sessionId, conversationId, item.model, item.time, item.reasoningEffort);
+        if (item.model) {
+          activeSelection = { model: item.model, reasoningEffort: item.reasoningEffort };
+          await observeSessionModel(sessionId, conversationId, item.model, item.time, item.reasoningEffort);
+        }
         break;
       case 'conversation_title':
         // Apply after canonical messages so legacy preview proof exists in either batch order.
@@ -2025,6 +2033,10 @@ async function recordChatObservationsNow(
           messageId: item.messageId,
           state,
           final: state === 'final',
+          ...((item.model ?? (item.activeNow ? activeSelection?.model : undefined))
+            ? { model: item.model ?? activeSelection!.model } : {}),
+          ...((item.reasoningEffort ?? (item.activeNow ? activeSelection?.reasoningEffort : undefined))
+            ? { reasoningEffort: item.reasoningEffort ?? activeSelection!.reasoningEffort } : {}),
           ...(item.providerMessageId ? { providerMessageId: item.providerMessageId } : {}),
           ...(goalEligible && state === 'final' ? { goalEligible: true } : {})
         }, { preferTime: item.authoredTime === true });

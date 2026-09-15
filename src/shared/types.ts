@@ -127,6 +127,8 @@ export interface TunnelSettings {
 
 export const CHAT_BROWSERS = ['chrome', 'edge', 'brave'] as const;
 export type ChatBrowser = (typeof CHAT_BROWSERS)[number];
+export const PRO_CHAT_ALLOWANCES = ['auto', 'pro-200', 'shared-50-week', 'business-standard-15-month'] as const;
+export type ProChatAllowance = (typeof PRO_CHAT_ALLOWANCES)[number];
 
 export interface UiPrefs {
   /** Maintenance may reuse existing tabs but cannot open helpers or missing chats. */
@@ -152,6 +154,8 @@ export interface UiPrefs {
   scale: number;
   /** Explicit choice, never inherited from the OS: the window looks how you left it. */
   theme: 'light' | 'dark';
+  /** Chat Pro allowance used only when ChatGPT does not expose a numeric remaining count. */
+  proChatAllowance?: ProChatAllowance;
 }
 
 /**

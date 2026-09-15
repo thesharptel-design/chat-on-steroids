@@ -480,7 +480,8 @@ function save(over: { readOnly?: boolean; theme?: 'light' | 'dark' } = {}): Prom
       developerMode: $<HTMLInputElement>('developerMode').checked,
       privacyScreenshots: $<HTMLInputElement>('privacyScreenshots').checked,
       scale: Number($<HTMLSelectElement>('uiScale').value),
-      theme: over.theme ?? previous.ui.theme
+      theme: over.theme ?? previous.ui.theme,
+      proChatAllowance: $<HTMLSelectElement>('proChatAllowance').value as NonNullable<AppState['config']['ui']['proChatAllowance']>
     },
     ...chatPatch
   };
@@ -1064,6 +1065,7 @@ function apply(next: AppState): void {
     previousState?.config.ui.privacyScreenshots
   );
   applyValue($<HTMLSelectElement>('uiScale'), String(config.ui.scale), String(previousState?.config.ui.scale ?? 0.9));
+  applyValue($<HTMLSelectElement>('proChatAllowance'), config.ui.proChatAllowance ?? 'auto', previousState?.config.ui.proChatAllowance ?? 'auto');
   zoomFactor = config.ui.scale;
   $('zoomReset').textContent = `${Math.round(config.ui.scale * 100)}%`;
   $('privacyScreenshotsSetting').hidden = !(next.platform?.desktopAutomation ?? true);
@@ -1773,6 +1775,7 @@ for (const id of [
   'minimizeToTray',
   'developerMode',
   'privacyScreenshots',
+  'proChatAllowance',
   'tunnelKind',
   'tunnelId',
   'desktopTunnelId'

@@ -13,7 +13,8 @@ const observation = z.object({
     id: z.string().min(1).max(80).regex(/^[a-zA-Z0-9._-]+$/),
     label: z.string().trim().min(1).max(80),
     efforts: z.array(z.enum(REASONING_EFFORTS)).max(REASONING_EFFORTS.length),
-    aliases: z.array(z.string().min(1).max(80).regex(/^[a-zA-Z0-9._-]+$/)).max(20).optional()
+    aliases: z.array(z.string().min(1).max(80).regex(/^[a-zA-Z0-9._-]+$/)).max(20).optional(),
+    unavailableEfforts: z.array(z.enum(REASONING_EFFORTS)).max(REASONING_EFFORTS.length).optional()
   }).strict()).min(1).max(20).nullable()
 }).strict();
 let catalog: ChatModelCatalog = { state: 'unknown', requestedAt: null, observedAt: null, models: [] };

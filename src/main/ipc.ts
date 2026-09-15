@@ -153,7 +153,8 @@ const settingsPatch = z.object({
     startAtLogin: z.boolean().optional(),
     privacyScreenshots: z.boolean(),
     scale: z.number().min(0.75).max(1.5),
-    theme: z.enum(['light', 'dark'])
+    theme: z.enum(['light', 'dark']),
+    proChatAllowance: z.enum(['auto', 'pro-200', 'shared-50-week', 'business-standard-15-month']).optional()
   }),
   sessions: z.object({
     record: z.boolean(),
@@ -282,7 +283,8 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
         wanted.ui.privacyScreenshots
       ),
       scale: pick(current.ui.scale, base.ui.scale, wanted.ui.scale),
-      theme: pick(current.ui.theme, base.ui.theme, wanted.ui.theme)
+      theme: pick(current.ui.theme, base.ui.theme, wanted.ui.theme),
+      proChatAllowance: pick(current.ui.proChatAllowance, base.ui.proChatAllowance, wanted.ui.proChatAllowance)
     },
     sessions: {
       record: pick(current.sessions.record, base.sessions.record, wanted.sessions.record),

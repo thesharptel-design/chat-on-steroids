@@ -306,6 +306,7 @@ const configSchema = z.object({
     startAtLogin: z.boolean().optional().default(false),
     privacyScreenshots: z.boolean().optional().default(false),
     scale: z.number().min(0.75).max(1.5).optional().default(0.9),
+    proChatAllowance: z.enum(['auto', 'pro-200', 'shared-50-week', 'business-standard-15-month']).optional().default('auto'),
     // Dark is the design the app is drawn for, and a config written before the theme
     // existed has no stored answer to override — so it is the default rather than the
     // fallback. An explicit `light` is somebody's own choice and is never touched.
@@ -481,7 +482,7 @@ export function defaultConfig(platform: NodeJS.Platform = process.platform, rele
     capabilities: firstLaunchCapabilities(platform, release),
     readOnly: false,
     tunnel: { kind: 'openai', tunnelId: '', desktopTunnelId: '', binaryPath: '' },
-    ui: { minimizeToTray: true, autoConnect: false, startAtLogin: false, privacyScreenshots: false, scale: 0.9, theme: 'dark', autoRefreshPlugins: false, backgroundChats: true },
+    ui: { minimizeToTray: true, autoConnect: false, startAtLogin: false, privacyScreenshots: false, scale: 0.9, theme: 'dark', proChatAllowance: 'auto', autoRefreshPlugins: false, backgroundChats: true },
     sessions: { ...DEFAULT_SESSIONS },
     compaction: { ...DEFAULT_COMPACTION },
     multiAgent: { ...FIRST_LAUNCH_MULTI_AGENT },

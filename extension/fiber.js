@@ -1410,11 +1410,21 @@
         const modelId = id(choice.modelSlug);
         const familyId = groupId(choice.category?.modelVersion) || modelId;
         const family = data.versions.find(version => version.id === familyId);
-        const name = modelLabel(choice.category?.shortLabel) || modelLabel(choice.modelConfig?.title) || modelId;
+        const providerLabel = modelLabel(choice.category?.shortLabel) || modelLabel(choice.modelConfig?.title);
+        const name = providerLabel || modelId;
+        const denial = props.modelSwitcherDenialsBySlug?.[choice.modelSlug];
+        const status = typeof choice.availability?.status === 'string' ? choice.availability.status : '';
+        const denialReason = typeof denial?.reason === 'string' ? denial.reason : '';
+        const unavailableText = `${status} ${denialReason}`.toLowerCase();
+        const available = status === 'available' && !denial;
+        const unavailableKind = available ? 'available'
+          : /(quota|rate.?limit|usage.?limit|exhaust|reset)/.test(unavailableText) ? 'quota'
+          : /(upgrade|workspace|permission|entitle|plan|access)/.test(unavailableText) ? 'entitlement'
+          : 'unavailable';
         return { bucket: choice.bucket, id: modelId,
           label: name, effort: effortOf(choice),
           familyId, familyLabel: modelLabel(family?.displayTextForIntelligence) || modelLabel(choice.modelConfig?.title) || name,
-          available: choice.availability?.status === 'available' && !props.modelSwitcherDenialsBySlug?.[choice.modelSlug] };
+          available, providerLabel: Boolean(providerLabel), unavailableKind };
       });
       const versions = data.versions.filter(version => version.enabled === true).map(version => ({ id: groupId(version.id), label: label(version.displayTextForIntelligence) }));
       if (!versions.length || versions.some(v => !v.id || !v.label) || choices.some(c => !Number.isInteger(c.bucket) || !c.id || !c.label || !c.effort) ||
