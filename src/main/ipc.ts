@@ -152,6 +152,7 @@ const settingsPatch = z.object({
     autoConnect: z.boolean(),
     startAtLogin: z.boolean().optional(),
     privacyScreenshots: z.boolean(),
+    scale: z.number().min(0.75).max(1.5),
     theme: z.enum(['light', 'dark'])
   }),
   sessions: z.object({
@@ -280,6 +281,7 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
         base.ui.privacyScreenshots,
         wanted.ui.privacyScreenshots
       ),
+      scale: pick(current.ui.scale, base.ui.scale, wanted.ui.scale),
       theme: pick(current.ui.theme, base.ui.theme, wanted.ui.theme)
     },
     sessions: {
@@ -465,6 +467,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     // live theme switch an old opposite background otherwise flashes behind the renderer while it
     // paints again. This is also the color Electron shows during any later renderer reload/failure.
     getWindow()?.setBackgroundColor(next.ui.theme === 'dark' ? '#0e0e11' : '#ffffff');
+    if (before.ui.scale !== next.ui.scale) getWindow()?.webContents.setZoomFactor(next.ui.scale * UI_BASE_ZOOM);
     if (
       before.goal.enabled !== next.goal.enabled ||
       // The mode is authority too: a draft started as a gate must not be typed after the user
@@ -905,7 +908,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     const { id, mode, loopAfterTurn } = z.object({ id: z.string().uuid(), mode: z.enum(['off', 'goal', 'loop']), loopAfterTurn: z.boolean().optional() }).parse(payload);
     return setInputAutomation(id, mode, loopAfterTurn);
   });
-  handle('window:getZoom', async () => (getWindow()?.webContents.getZoomFactor() ?? UI_BASE_ZOOM) / UI_BASE_ZOOM);
+  handle('window:getZoom', async () => (getWindow()?.webContents.getZoomFactor() ?? (getConfig().ui.scale * UI_BASE_ZOOM)) / UI_BASE_ZOOM);
   handle('window:zoom', async (payload) => {
     const { factor } = z.object({ factor: z.number().min(0.75).max(1.5) }).parse(payload);
     getWindow()?.webContents.setZoomFactor(factor * UI_BASE_ZOOM);

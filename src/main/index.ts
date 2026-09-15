@@ -63,7 +63,7 @@ import {
 import { startSessionRetentionMaintenance } from './session/retention.js';
 import { runShutdownSequence } from './shutdown.js';
 import { applyStagedUpdate, startUpdateChecks } from './update.js';
-import { UI_BASE_ZOOM, windowLayoutForWorkArea, titleBarOverlayForTheme } from './window-layout.js';
+import { UI_BASE_ZOOM, windowLayoutForWorkArea, titleBarOverlayForTheme, type DisplayWorkArea } from './window-layout.js';
 import { openInPreferredBrowser } from './browser.js';
 import {
   applyLoginStartup,
@@ -81,7 +81,9 @@ import { editContextMenuTemplate } from './edit-context-menu.js';
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
 const RETIRED_WORKERS_STATE = 'retired-workers';
+const WINDOW_BOUNDS_STATE = 'window-bounds-v1';
 
+let restoredWindowBounds: DisplayWorkArea | null = null;
 let window: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
@@ -101,7 +103,8 @@ if (!hasSingleInstanceLock) {
 }
 
 function createWindow(): void {
-  const layout = windowLayoutForWorkArea(screen.getPrimaryDisplay().workArea);
+  const display = restoredWindowBounds ? screen.getDisplayMatching(restoredWindowBounds) : screen.getPrimaryDisplay();
+  const layout = windowLayoutForWorkArea(display.workArea, restoredWindowBounds ?? undefined);
   const icon = browserWindowIconPath(process.platform, app.isPackaged, process.resourcesPath);
   window = new BrowserWindow({
     ...layout,
@@ -117,7 +120,7 @@ function createWindow(): void {
     backgroundColor: getConfig().ui.theme === 'dark' ? '#0e0e11' : '#ffffff',
     title: 'Chat On Steroids',
     webPreferences: {
-      zoomFactor: UI_BASE_ZOOM,
+      zoomFactor: UI_BASE_ZOOM * getConfig().ui.scale,
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
@@ -130,6 +133,16 @@ function createWindow(): void {
 
   if (process.platform === 'win32') window.removeMenu();
 
+  const rememberWindowBounds = (): void => {
+    const owner = window;
+    if (!owner || owner.isDestroyed() || owner.isMinimized()) return;
+    const bounds = owner.getNormalBounds();
+    restoredWindowBounds = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+    writeDurableSoon(WINDOW_BOUNDS_STATE, restoredWindowBounds);
+  };
+  window.on('resize', rememberWindowBounds);
+  window.on('move', rememberWindowBounds);
+
   // First use discovers the account once. A restored catalog is immediately usable;
   // showing the window again cannot refresh it or open another browser attempt.
   window.on('show', () => {
@@ -140,17 +153,20 @@ function createWindow(): void {
     // A renderer can finish loading after Cmd+Q has already entered bounded teardown. Never let
     // that late native event make the app visible again while `will-quit` is draining.
     if (!quitting) {
-      // Newly created windows intentionally start maximized. Keep that startup-only presentation
-      // here so later tray/Dock/native activation can show an existing user-sized window without
-      // overwriting its geometry.
-      if (!window?.isFullScreen()) window?.maximize();
+      // Start in the remembered normal window, never maximized. Maximizing during a session keeps
+      // the underlying normal bounds, which are what the next launch restores.
       showWindow();
     }
   });
 
   // A renderer that fails to load leaves a blank window with no other clue, so
   // record it where the diagnostics panel can show it.
-  window.webContents.on('did-finish-load', () => logInfo('window loaded'));
+  window.webContents.on('did-finish-load', () => {
+    // Chromium persists zoom per origin, which can override webPreferences.zoomFactor after a
+    // previous run. Re-assert the user's saved interface scale once the local renderer loads.
+    window?.webContents.setZoomFactor(getConfig().ui.scale * UI_BASE_ZOOM);
+    logInfo('window loaded');
+  });
   window.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown' || input.key !== 'F11' || input.isAutoRepeat) return;
     event.preventDefault();
@@ -306,6 +322,11 @@ void app.whenReady().then(async () => {
   await restoreChatModels();
   if (windowActivation.isDisabled()) return;
   await loadConfig();
+  const savedWindowBounds = await readDurable<DisplayWorkArea>(WINDOW_BOUNDS_STATE);
+  if (savedWindowBounds && [savedWindowBounds.x, savedWindowBounds.y, savedWindowBounds.width, savedWindowBounds.height].every(Number.isFinite) &&
+      savedWindowBounds.width >= 320 && savedWindowBounds.height >= 240 && savedWindowBounds.width <= 10000 && savedWindowBounds.height <= 10000) {
+    restoredWindowBounds = savedWindowBounds;
+  }
   try { await initSkills(userData); }
   catch (error) { logWarn(`Skills could not initialize: ${error instanceof Error ? error.message : String(error)}`); }
   await pluginManager.initialize(userData);

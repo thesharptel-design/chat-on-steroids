@@ -34,21 +34,23 @@ const MIN_HEIGHT = 480;
  * outer window inside that work area: using content-size bounds would add the Windows frame
  * on top and can put controls below the taskbar on scaled/small displays.
  */
-export function windowLayoutForWorkArea(workArea: DisplayWorkArea): MainWindowLayout {
+export function windowLayoutForWorkArea(workArea: DisplayWorkArea, restored?: DisplayWorkArea): MainWindowLayout {
   const areaWidth = Math.max(1, Math.floor(workArea.width));
   const areaHeight = Math.max(1, Math.floor(workArea.height));
-  const width = areaWidth;
-  const height = areaHeight;
+  const minWidth = Math.min(MIN_WIDTH, areaWidth);
+  const minHeight = Math.min(MIN_HEIGHT, areaHeight);
+  const desiredWidth = restored ? Math.floor(restored.width) : 1280;
+  const desiredHeight = restored ? Math.floor(restored.height) : 820;
+  const width = Math.min(areaWidth, Math.max(minWidth, desiredWidth));
+  const height = Math.min(areaHeight, Math.max(minHeight, desiredHeight));
+  const minX = Math.round(workArea.x);
+  const minY = Math.round(workArea.y);
+  const maxX = minX + areaWidth - width;
+  const maxY = minY + areaHeight - height;
+  const centeredX = minX + Math.round((areaWidth - width) / 2);
+  const centeredY = minY + Math.round((areaHeight - height) / 2);
+  const x = restored ? Math.min(maxX, Math.max(minX, Math.round(restored.x))) : centeredX;
+  const y = restored ? Math.min(maxY, Math.max(minY, Math.round(restored.y))) : centeredY;
 
-  return {
-    x: Math.round(workArea.x),
-    y: Math.round(workArea.y),
-    width,
-    height,
-    minWidth: Math.min(MIN_WIDTH, width),
-    minHeight: Math.min(MIN_HEIGHT, height),
-    useContentSize: false,
-    resizable: true,
-    maximizable: true
-  };
+  return { x, y, width, height, minWidth, minHeight, useContentSize: false, resizable: true, maximizable: true };
 }

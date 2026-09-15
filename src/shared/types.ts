@@ -148,6 +148,8 @@ export interface UiPrefs {
   privacyScreenshots: boolean;
   /** Browser for app-originated launches; connected source tabs retain placement ownership. */
   chatBrowser?: ChatBrowser;
+  /** Relative application UI scale. 1 is the product design size. */
+  scale: number;
   /** Explicit choice, never inherited from the OS: the window looks how you left it. */
   theme: 'light' | 'dark';
 }

@@ -25,6 +25,14 @@ afterAll(async () => {
 });
 
 describe('settings migration', () => {
+  it('defaults interface scale to 90% for fresh and legacy configs while preserving a saved choice', async () => {
+    expect(defaultConfig().ui.scale).toBe(0.9);
+    const legacy = defaultConfig(); delete (legacy.ui as Partial<typeof legacy.ui>).scale;
+    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(legacy), 'utf8');
+    expect((await loadConfig()).ui.scale).toBe(0.9);
+    await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, scale: 1.1 } });
+    expect((await loadConfig()).ui.scale).toBe(1.1);
+  });
   it('defaults background chats on for fresh and omitted settings while preserving saved choices', async () => {
     expect(defaultConfig().ui.backgroundChats).toBe(true);
     expect((await loadConfig()).ui.backgroundChats).toBe(true);

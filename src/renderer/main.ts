@@ -165,7 +165,12 @@ void api.getZoom().then(result => {
 async function zoom(next: number): Promise<void> {
   zoomEdited = true;
   const result = await run(api.setZoom(Math.min(1.5, Math.max(.75, next))));
-  if (result !== null) { zoomFactor = result; $('zoomReset').textContent = `${Math.round(result * 100)}%`; }
+  if (result !== null) {
+    zoomFactor = result;
+    $<HTMLSelectElement>('uiScale').value = String(result);
+    $('zoomReset').textContent = `${Math.round(result * 100)}%`;
+    await save();
+  }
 }
 $('zoomOut').addEventListener('click', () => void zoom(zoomFactor - .1));
 $('zoomIn').addEventListener('click', () => void zoom(zoomFactor + .1));
@@ -474,6 +479,7 @@ function save(over: { readOnly?: boolean; theme?: 'light' | 'dark' } = {}): Prom
       minimizeToTray: $<HTMLInputElement>('minimizeToTray').checked,
       developerMode: $<HTMLInputElement>('developerMode').checked,
       privacyScreenshots: $<HTMLInputElement>('privacyScreenshots').checked,
+      scale: Number($<HTMLSelectElement>('uiScale').value),
       theme: over.theme ?? previous.ui.theme
     },
     ...chatPatch
@@ -1057,6 +1063,9 @@ function apply(next: AppState): void {
     config.ui.privacyScreenshots,
     previousState?.config.ui.privacyScreenshots
   );
+  applyValue($<HTMLSelectElement>('uiScale'), String(config.ui.scale), String(previousState?.config.ui.scale ?? 0.9));
+  zoomFactor = config.ui.scale;
+  $('zoomReset').textContent = `${Math.round(config.ui.scale * 100)}%`;
   $('privacyScreenshotsSetting').hidden = !(next.platform?.desktopAutomation ?? true);
   if (next.platform?.family === 'macos') {
     ui($('backgroundRunningCopy'), 'textContent', () => t("Leave it running while you use the connector. It stays available from the menu bar and Dock when you close the window."));
@@ -1755,6 +1764,8 @@ $('removeApiKey').addEventListener('click', async () => {
     toast('API key removed');
   }
 });
+
+$('uiScale').addEventListener('change', () => void zoom(Number($<HTMLSelectElement>('uiScale').value)));
 
 for (const id of [
   'autoConnect',
