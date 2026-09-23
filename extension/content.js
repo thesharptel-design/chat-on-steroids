@@ -10725,20 +10725,25 @@
     }
   }
   function catalogPageReady() {
-    // A catalog covers every native version, not just the selected group's buckets.
-    // Elect an idle composer before inspecting those groups and restoring selection.
-    return alive && !desktopInputBusy && !generating && !CLF_DOM.generating() &&
-      CLF_DOM.composerVisible() && !CLF_DOM.hasComposerAttachments() &&
-      (catalogHelper() || !CLF_DOM.composer()?.textContent?.trim());
+    return catalogPageBlocker() === null;
+  }
+  function catalogPageBlocker() {
+    if (!alive) return 'page_changed';
+    if (desktopInputBusy) return 'input_busy';
+    if (generating || CLF_DOM.generating()) return 'generating';
+    if (!CLF_DOM.composer()) return 'composer_missing';
+    if (!CLF_DOM.composerVisible()) return 'composer_hidden';
+    if (CLF_DOM.hasComposerAttachments()) return 'attachments';
+    if (CLF_DOM.composer().textContent?.trim()) return 'draft';
+    return null;
   }
   function catalogHelper() {
     return !conversationId && location.pathname === '/' &&
-      !!new URL(location.href).searchParams.get('cos-model-catalog') && !CLF_DOM.turns().length;
+      /^[a-f0-9-]{36}$/i.test(new URL(location.href).searchParams.get('cos-model-catalog') || '') && !CLF_DOM.turns().length;
   }
   async function inspectAppModelCatalog(message) {
     const ownedEpoch = epoch;
-    // This dedicated helper is app-owned. ChatGPT restores the home-page draft
-    // here; clear that stale text before discovery, as for a fresh send bootstrap.
+    // Discovery never owns authored text, including a draft restored on its helper.
     if (modelCatalogBusy || !/^[a-f0-9-]{36}$/i.test(message.nonce) || Date.now() >= message.expiresAt) return false;
     modelCatalogBusy = true;
     try {
@@ -10746,12 +10751,10 @@
     // The owned helper registers before React mounts its composer. Hold this one
     // request on the existing DOM readiness observer instead of waiting for the
     // next 30-second service-worker maintenance pass.
-    if (!catalogPageReady() && catalogHelper()) {
+    if (['composer_missing', 'composer_hidden'].includes(catalogPageBlocker()) && catalogHelper()) {
       await waitPageView(catalogPageReady, () => current() && catalogHelper(), 15000);
     }
     if (!current() || !catalogPageReady()) return false;
-    const restoredText = CLF_DOM.composer().textContent;
-    if (catalogHelper() && restoredText?.trim() && !CLF_DOM.clearPromptExact(restoredText)) return false;
     // Work swaps the composer as well as its picker. Complete that owned transition
     // before binding the exact Chat composer used by the remaining inspection.
     const switchCurrent = () => current() && !generating && !CLF_DOM.generating() && !desktopInputBusy &&
@@ -10790,7 +10793,8 @@
         return true;
       }
       if (message.type === 'clf-model-catalog') {
-        void inspectAppModelCatalog(message).then(result => sendResponse(typeof result === 'object' ? result : { ok: result })).catch(() => sendResponse({ ok: false }));
+        void inspectAppModelCatalog(message).then(result => sendResponse({ ok: result === true,
+          ...(!result ? { reason: catalogPageBlocker() || 'page_changed' } : {}) })).catch(() => sendResponse({ ok: false, reason: 'inspection_failed' }));
         return true;
       }
       if (message.type === 'clf-plugin-refresh') {
@@ -10801,7 +10805,8 @@
         sendResponse({ safe: !pluginRefreshBusy && ownsPluginRefreshPage(message.id) && CLF_DOM.pluginManagementIdle() }); return false;
       }
       if (message.type === 'clf-model-catalog-state') {
-        sendResponse({ ready: !modelCatalogBusy && (catalogPageReady() || (catalogHelper() && !CLF_DOM.composer())) });
+        const reason = modelCatalogBusy ? 'inspection_busy' : catalogPageBlocker();
+        sendResponse({ ready: !modelCatalogBusy && (!reason || (reason === 'composer_missing' && catalogHelper())), reason });
         return false;
       }
       if (message.type === 'clf-input-reuse-state') {

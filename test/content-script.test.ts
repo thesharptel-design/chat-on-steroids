@@ -496,7 +496,7 @@ describe('one synchronous page snapshot per observer turn', () => {
     Object.defineProperty(composer, 'getClientRects', { value: () => [{ width: 400, height: 60 }] });
     expect(await live.runtimeMessage({ type: 'clf-model-catalog-state' })).toMatchObject({ ready: true });
     composer.setAttribute('aria-hidden', 'true');
-    expect(await live.runtimeMessage({ type: 'clf-model-catalog-state' })).toMatchObject({ ready: false });
+    expect(await live.runtimeMessage({ type: 'clf-model-catalog-state' })).toMatchObject({ ready: false, reason: 'composer_hidden' });
     composer.removeAttribute('aria-hidden');
     expect(await live.runtimeMessage({ type: 'clf-model-catalog-state' })).toMatchObject({ ready: true });
     expect(await live.runtimeMessage({ type: 'clf-tab-close-check', conversationId: null })).toMatchObject({ safe: true, conversationId: null });

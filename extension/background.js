@@ -2111,8 +2111,13 @@ function inspectRequestedModels(request) {
     if (wanted && Date.now() >= wanted.expiresAt) return;
     if (!wanted && !tab) return;
     if (!tab) {
-      // An existing helper may be temporarily busy. Retain it and wait.
-      if (wanted.allowOpen === false || owner?.nonce === wanted.nonce || tabs.length) return;
+      // Only an explicit Refresh may bypass user pages that positively report a protected
+      // busy state. Missing/hydrating receivers and an already elected helper never mint
+      // another tab, so this fast fallback cannot duplicate ambiguous browser work.
+      const blocked = ['generating', 'input_busy', 'draft', 'attachments', 'composer_hidden'];
+      const bypassBusy = wanted.allowOpen === true && tabs.length > 0 &&
+        tabs.every((candidate, index) => !catalogTabNonce(candidate) && proofs[index]?.ready === false && blocked.includes(proofs[index]?.reason));
+      if (wanted.allowOpen === false || owner?.nonce === wanted.nonce || (tabs.length && !bypassBusy)) return;
       await chrome.storage.session.set({ modelCatalogOwner: { nonce: wanted.nonce, opening: true } });
       tab = await createChatTab(`https://chatgpt.com/?cos-model-catalog=${wanted.nonce}`, true);
       await chrome.storage.session.set({ modelCatalogOwner: { nonce: wanted.nonce, tab: tab.id } });
@@ -2147,7 +2152,7 @@ function inspectRequestedModels(request) {
       try {
         return await Promise.race([
           documentId ? chrome.tabs.sendMessage(tab.id, message, { documentId }) : chrome.tabs.sendMessage(tab.id, message),
-          new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, Math.min(35000, wanted.expiresAt - Date.now()))); })
+          new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, wanted.expiresAt - Date.now())); })
         ]);
       } finally { clearTimeout(timer); }
     };
@@ -3432,6 +3437,12 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
   const leftChatGpt = typeof changeInfo.url === 'string' && !isChatGptUrl(changeInfo.url);
   if (!fullNavigation && !completedNavigation && !leftChatGpt) return;
   if (fullNavigation || leftChatGpt) clearDeferredRevivalOffersForTab(id);
+  if (completedNavigation && !leftChatGpt) {
+    void load().then(async () => {
+      const owner = (await chrome.storage.session.get('modelCatalogOwner')).modelCatalogOwner;
+      if (owner?.tab === id && !owner.handedToInput) return maintain(true);
+    }).catch(() => undefined);
+  }
   // A loading transition is a browser document boundary even when both URLs are ChatGPT.
   // SPA pushState does not emit it. The replacement document must register with its own
   // MessageSender.documentId before any identity-sensitive IPC is accepted.

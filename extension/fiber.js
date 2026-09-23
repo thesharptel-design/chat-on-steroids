@@ -44,8 +44,8 @@
   const VERSION = 10;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
-  // listener. Keep at most one listener for this protocol version; content.js rejects older
-  // versions, so a v5 listener can coexist harmlessly until the document itself navigates.
+  // listener. Retire it across versions too: picker/plugin replies use shared channels, so an
+  // old helper can otherwise win with an empty or stale snapshot after an extension update.
   const ACTIVE_HELPER = '__clfFiberHelper';
   const ASK = 'clf-fiber-ask';
   const REPLY = 'clf-fiber-reply';
@@ -1540,7 +1540,7 @@
   // Re-execution is a repair, not a marker check. A stale primitive marker could survive
   // while its listener did not, so keep the actual listener and always replace it.
   const prior = window[ACTIVE_HELPER];
-  if (prior && prior.version === VERSION && typeof prior.listener === 'function') {
+  if (prior && typeof prior.listener === 'function') {
     try {
       window.removeEventListener('message', prior.listener);
     } catch {
