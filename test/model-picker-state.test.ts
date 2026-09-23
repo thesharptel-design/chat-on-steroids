@@ -141,6 +141,13 @@ it('rejects a mounted composer hidden by Settings while recognizing the visible 
   expect(await f.api.inspectModelSettings()).toHaveLength(2);
   expect(f.state.currentBucket).toBe(2);
 });
+it('uses the closed account-evaluated picker as a zero-mutation fast path when the requested model is already selected', async () => {
+  const f = fixture();
+  expect(await f.api.selectModelSettings('gpt-5-6-thinking', 'high')).toBe(true);
+  expect(f.actions).not.toHaveBeenCalled();
+  expect(page.window.document.querySelector('[data-testid="composer-intelligence-picker-content"]')).toBeNull();
+  expect(f.state.currentSelection).toMatchObject({ modelSlug: 'gpt-5-6-thinking', thinkingEffort: 'extended' });
+});
 it('confirms the exact model and effort and refuses visible upgrade-only entries', async () => {
   const f = fixture();
   expect(await f.api.selectModelSettings('future-model', 'ultra')).toBe(true);

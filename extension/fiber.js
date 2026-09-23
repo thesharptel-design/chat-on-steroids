@@ -1329,7 +1329,9 @@
       turns = [];
       scanOk = false;
     }
-    post({ source: REPLY, nonce, scanToken, v: VERSION, scanOk, rows, turns }, location.origin);
+    let picker = null;
+    if (scanOk) try { picker = pickerSnapshot(); } catch { /* Picker absence is not a scan failure. */ }
+    post({ source: REPLY, nonce, scanToken, v: VERSION, scanOk, rows, turns, picker }, location.origin);
   }
 
   /** Picker data is account-evaluated state, never a scraped English announcement.

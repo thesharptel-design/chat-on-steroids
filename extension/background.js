@@ -2671,6 +2671,12 @@ const HANDLERS = {
     const result = await call('/models', { method: 'POST', body });
     return result;
   },
+  async model_catalog_passive(message, _sender, source) {
+    if (!ownsDocument(source) || !Array.isArray(message.models) || message.models.length < 1 || message.models.length > 20 || !Number.isFinite(message.observedAt)) return { ok: false };
+    const body = JSON.stringify({ models: message.models, observedAt: message.observedAt });
+    if (body.length > 12000) return { ok: false };
+    return call('/models/passive', { method: 'POST', body });
+  },
   async usage_observation(message, _sender, source) {
     if (!ownsDocument(source) || !Array.isArray(message.rows) || message.rows.length > 80) return { ok: false };
     const plan = typeof message.plan === 'string' && /^[a-zA-Z0-9_. /-]{1,100}$/.test(message.plan) ? message.plan : undefined;
@@ -3339,6 +3345,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     'stop_ack',
     'desktop_input',
     'model_catalog',
+    'model_catalog_passive',
     'plugin_refresh',
     'usage_observation',
     'events',

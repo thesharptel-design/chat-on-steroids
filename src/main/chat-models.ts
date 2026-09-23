@@ -6,25 +6,29 @@ import { z } from 'zod';
 import { logInfo } from './logger.js';
 import type { ChatModelCatalog } from '../shared/chat-models.js';
 import { readDurable, writeDurableSoon } from './durable.js';
+const modelOption = z.object({
+  id: z.string().min(1).max(80).regex(/^[a-zA-Z0-9._-]+$/),
+  label: z.string().trim().min(1).max(80),
+  efforts: z.array(z.enum(REASONING_EFFORTS)).max(REASONING_EFFORTS.length),
+  aliases: z.array(z.string().min(1).max(80).regex(/^[a-zA-Z0-9._-]+$/)).max(20).optional(),
+  unavailableEfforts: z.array(z.enum(REASONING_EFFORTS)).max(REASONING_EFFORTS.length).optional()
+}).strict();
+const modelList = z.array(modelOption).min(1).max(20);
 const observation = z.object({
   nonce: z.string().uuid(),
   error: z.enum(['picker_unavailable', 'model_unconfirmed', 'power_unknown', 'power_unconfirmed', 'power_changed', 'restore_failed', 'inspection_failed']).optional(),
-  models: z.array(z.object({
-    id: z.string().min(1).max(80).regex(/^[a-zA-Z0-9._-]+$/),
-    label: z.string().trim().min(1).max(80),
-    efforts: z.array(z.enum(REASONING_EFFORTS)).max(REASONING_EFFORTS.length),
-    aliases: z.array(z.string().min(1).max(80).regex(/^[a-zA-Z0-9._-]+$/)).max(20).optional(),
-    unavailableEfforts: z.array(z.enum(REASONING_EFFORTS)).max(REASONING_EFFORTS.length).optional()
-  }).strict()).min(1).max(20).nullable()
+  models: modelList.nullable()
 }).strict();
+const passiveObservation = z.object({ models: modelList, observedAt: z.number().finite().positive() }).strict();
 let catalog: ChatModelCatalog = { state: 'unknown', requestedAt: null, observedAt: null, models: [] };
 let request: { nonce: string; expiresAt: number; allowOpen: boolean } | null = null;
 let deadline: ReturnType<typeof setTimeout> | null = null;
 let launch: { nonce: string; allowOpen: boolean; work: Promise<void> } | null = null;
 let changed = (): void => {};
 let wake: ((nonce: string, allowOpen: boolean) => Promise<void>) | null = null;
+let latestPassiveObservedAt = 0;
 export async function restoreChatModels(): Promise<void> {
-  const saved = z.object({ observedAt: z.number().finite().positive(), models: observation.shape.models.unwrap() }).strict().safeParse(await readDurable('chat-models'));
+  const saved = z.object({ observedAt: z.number().finite().positive(), models: modelList }).strict().safeParse(await readDurable('chat-models'));
   if (!saved.success || request || catalog.state !== 'unknown') return;
   const models = saved.data.models;
   if (new Set(models.map(model => model.id)).size !== models.length || models.some(model => new Set(model.efforts).size !== model.efforts.length)) return;
@@ -98,6 +102,30 @@ export async function startChatModelDiscovery(allowOpen = true): Promise<ChatMod
 export function pendingChatModelRequest(): { nonce: string; expiresAt: number; allowOpen: boolean } | null {
   expire(); return request ? { ...request } : null;
 }
+/** Merge a passive closed-picker snapshot into an already proven catalog.
+ * Partial snapshots may refresh or add choices, but can never establish the first account catalog. */
+export function observePassiveChatModels(raw: unknown): boolean {
+  const parsed = passiveObservation.safeParse(raw);
+  if (!parsed.success || !catalog.models.length) return false;
+  const { models, observedAt } = parsed.data;
+  const now = Date.now();
+  if (observedAt > now + 5000 || now - observedAt > 10 * 60_000 || observedAt < latestPassiveObservedAt) return false;
+  if (new Set(models.map(model => model.id)).size !== models.length ||
+      models.some(model => new Set(model.efforts).size !== model.efforts.length ||
+        (model.unavailableEfforts && new Set(model.unavailableEfforts).size !== model.unavailableEfforts.length))) return false;
+  const incoming = new Map(models.map(model => [model.id, model]));
+  const merged = catalog.models.map(model => incoming.get(model.id) ?? model);
+  const known = new Set(catalog.models.map(model => model.id));
+  for (const model of models) if (!known.has(model.id)) merged.push(model);
+  const before = JSON.stringify(catalog.models);
+  if (before === JSON.stringify(merged)) { latestPassiveObservedAt = observedAt; return true; }
+  latestPassiveObservedAt = observedAt;
+  catalog = { ...catalog, models: merged, error: undefined };
+  writeDurableSoon('chat-models', { observedAt: catalog.observedAt ?? observedAt, models: merged });
+  logInfo(`model passive cache merged models=${models.length} total=${merged.length}`);
+  changed();
+  return true;
+}
 export function observeChatModels(raw: unknown): boolean {
   expire(); const parsed = observation.safeParse(raw);
   if (!parsed.success || !request || parsed.data.nonce !== request.nonce) return false;
@@ -118,5 +146,5 @@ export function observeChatModels(raw: unknown): boolean {
 }
 export function resetChatModelsForTests(): void {
   if (deadline) clearTimeout(deadline); deadline = null; launch = null;
-  request = null; catalog = { state: 'unknown', requestedAt: null, observedAt: null, models: [] };
+  request = null; latestPassiveObservedAt = 0; catalog = { state: 'unknown', requestedAt: null, observedAt: null, models: [] };
 }

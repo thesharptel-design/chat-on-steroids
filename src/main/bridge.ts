@@ -2,7 +2,7 @@ import { conversationProgress } from './session/progress.js';
 import { goalErrorMessage } from '../shared/goal-errors.js';
 import { MAX_CHATGPT_MESSAGE_CHARS, userPromptText } from '../shared/user-prompt.js';
 import { prepareSessionPrompt } from './session/prompt.js';
-import { pendingChatModelRequest, observeChatModels, requestChatModels } from './chat-models.js';
+import { pendingChatModelRequest, observeChatModels, observePassiveChatModels, requestChatModels } from './chat-models.js';
 import { isProModel } from '../shared/chat-models.js';
 import type { SessionSummary } from '../shared/session.js';
 import { publishBrowserDecision, authorizeBrowserInput, sessionInputPolicy, collectRecordedBrowserDecision, type InputActivity } from './session/input.js';
@@ -1525,6 +1525,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
 
   if (route === '/models' && req.method === 'POST') {
     const accepted = observeChatModels(await readBody(req));
+    if (accepted) changed();
+    return json(res, accepted ? 200 : 409, { ok: accepted }, origin);
+  }
+  if (route === '/models/passive' && req.method === 'POST') {
+    const accepted = observePassiveChatModels(await readBody(req));
     if (accepted) changed();
     return json(res, accepted ? 200 : 409, { ok: accepted }, origin);
   }

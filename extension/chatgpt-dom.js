@@ -2131,6 +2131,11 @@ var CLF_DOM = (() => {
   }
   async function selectModelSettings(model, effort, stillCurrent = () => true) {
     if (!model && !effort) return true;
+    const passive = stillCurrent() ? await readPickerState() : null;
+    const current = passive?.choices.find(choice => choice.bucket === passive.currentBucket && choice.available);
+    const sameModel = choice => !model || choice.familyId === model || choice.id === model ||
+      normalizeModelLabel(choice.familyLabel) === normalizeModelLabel(model) || normalizeModelLabel(choice.label) === normalizeModelLabel(model);
+    if (current && (!effort || current.effort === effort) && sameModel(current)) return true;
     const ui = modelPickerAccess(stillCurrent), original = await ui.open();
     if (!original) { ui.close(); return false; }
     let selected = false;

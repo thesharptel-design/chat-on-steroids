@@ -2995,6 +2995,37 @@
   /** Exact scan frame those two descriptor maps came from. */
   let fiberScanToken = null;
   let fiberAsking = null;
+  let lastPassiveModelProjection = '';
+  function passivePickerModels(raw) {
+    if (!raw || typeof raw !== 'object' || !Array.isArray(raw.choices) || raw.choices.length < 1 || raw.choices.length > 12) return null;
+    const groups = new Map();
+    for (const choice of raw.choices) {
+      if (!choice || !Number.isInteger(choice.bucket) || typeof choice.id !== 'string' || !/^[a-zA-Z0-9._-]{1,80}$/.test(choice.id) ||
+          typeof choice.familyId !== 'string' || !/^[a-zA-Z0-9._ -]{1,80}$/.test(choice.familyId) ||
+          typeof choice.familyLabel !== 'string' || !choice.familyLabel.trim() || choice.familyLabel.length > 80 ||
+          !['none','minimal','low','medium','high','xhigh','max','ultra','pro'].includes(choice.effort) || typeof choice.available !== 'boolean') return null;
+      const unavailablePro = !choice.available && choice.effort === 'pro' && choice.providerLabel === true &&
+        ['quota', 'unavailable'].includes(choice.unavailableKind) && /^(?:gpt-?6-pro|gpt-?5-6-pro)$/i.test(choice.id);
+      if (!choice.available && !unavailablePro) continue;
+      const entry = groups.get(choice.familyId) || { id: choice.familyId, label: choice.familyLabel, efforts: [], aliases: [], unavailableEfforts: [] };
+      if (!entry.efforts.includes(choice.effort)) entry.efforts.push(choice.effort);
+      if (!entry.aliases.includes(choice.id)) entry.aliases.push(choice.id);
+      if (choice.available) entry.unavailableEfforts = entry.unavailableEfforts.filter(effort => effort !== choice.effort);
+      else if (!entry.unavailableEfforts.includes(choice.effort)) entry.unavailableEfforts.push(choice.effort);
+      groups.set(choice.familyId, entry);
+    }
+    const models = [...groups.values()].slice(0, 20);
+    for (const model of models) if (!model.unavailableEfforts.length) delete model.unavailableEfforts;
+    return models.length ? models : null;
+  }
+  function publishPassiveModelCatalog(raw) {
+    const models = passivePickerModels(raw);
+    if (!models) return;
+    const encoded = JSON.stringify(models);
+    if (encoded === lastPassiveModelProjection || encoded.length > 12000) return;
+    const observedAt = Date.now();
+    void ask({ type: 'model_catalog_passive', models, observedAt }).then(reply => { if (reply?.ok) lastPassiveModelProjection = encoded; });
+  }
   /** Off until the helper answers once, so a browser without it behaves exactly as before. */
   let fiberPresent = false;
   /** Avoid turning a missing MAIN-world helper into one script injection per observer tick. */
@@ -3266,6 +3297,7 @@
         // being accidentally interpreted against the current descriptor indexes.
         if (data.scanToken !== nonce) return;
         if (data.scanOk !== true) return finish(null);
+        publishPassiveModelCatalog(data.picker);
         const turns = [];
         if (Array.isArray(data.turns)) {
           for (const raw of data.turns.slice(0, FIBER_MAX_TURNS)) {

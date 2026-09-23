@@ -1,6 +1,6 @@
 import { REASONING_EFFORTS } from '../src/shared/session.js';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
-import { getChatModels, requestChatModels, pendingChatModelRequest, observeChatModels, resetChatModelsForTests, configureChatModelDiscovery, startChatModelDiscovery, restoreChatModels } from '../src/main/chat-models.js';
+import { getChatModels, requestChatModels, pendingChatModelRequest, observeChatModels, observePassiveChatModels, resetChatModelsForTests, configureChatModelDiscovery, startChatModelDiscovery, restoreChatModels } from '../src/main/chat-models.js';
 const saved = vi.hoisted(() => ({ value: null as unknown }));
 vi.mock('../src/main/durable.js', () => ({ readDurable: async () => saved.value, writeDurableSoon: (_name: string, value: unknown) => { saved.value = structuredClone(value); } }));
 const models = [{ id: 'gpt-example', label: 'GPT Example', efforts: ['none', 'medium', 'high', 'xhigh'] }];
@@ -16,6 +16,35 @@ describe('durable observed ChatGPT model catalog', () => {
     await startChatModelDiscovery(false);
     expect(wake).not.toHaveBeenCalled();
   });
+  it('merges passive closed-picker choices into a proven catalog without starting discovery', () => {
+    const full = [
+      { id: 'gpt-a', label: 'GPT A', efforts: ['medium', 'high'] },
+      { id: 'gpt-b', label: 'GPT B', efforts: ['high'] }
+    ];
+    requestChatModels(); observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models: full });
+    const observedAt = Date.now();
+    expect(observePassiveChatModels({ models: [
+      { id: 'gpt-a', label: 'GPT A', efforts: ['medium', 'high', 'pro'], unavailableEfforts: ['pro'] },
+      { id: 'gpt-c', label: 'GPT C', efforts: ['low'] }
+    ], observedAt })).toBe(true);
+    expect(pendingChatModelRequest()).toBeNull();
+    expect(getChatModels().models).toEqual([
+      { id: 'gpt-a', label: 'GPT A', efforts: ['medium', 'high', 'pro'], unavailableEfforts: ['pro'] },
+      { id: 'gpt-b', label: 'GPT B', efforts: ['high'] },
+      { id: 'gpt-c', label: 'GPT C', efforts: ['low'] }
+    ]);
+    expect(saved.value).toMatchObject({ models: getChatModels().models });
+  });
+  it('never lets a partial passive snapshot establish or corrupt the first catalog', () => {
+    const observedAt = Date.now();
+    expect(observePassiveChatModels({ models, observedAt })).toBe(false);
+    expect(getChatModels()).toMatchObject({ state: 'unknown', models: [] });
+    requestChatModels(); observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models });
+    expect(observePassiveChatModels({ models: [{ ...models[0]!, efforts: ['high', 'high'] }], observedAt: observedAt + 1 })).toBe(false);
+    expect(observePassiveChatModels({ models: [{ ...models[0]!, label: 'changed' }], observedAt: observedAt - 11 * 60_000 })).toBe(false);
+    expect(getChatModels().models[0]!.label).toBe('GPT Example');
+  });
+
   it('keeps usable choices through refresh and a failed refresh', () => {
     requestChatModels(); observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models });
     requestChatModels();
