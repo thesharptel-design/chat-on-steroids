@@ -206,7 +206,7 @@ describe('finding a newer release', () => {
 });
 
 describe('staging the new version', () => {
-  it('downloads the artifact, checks it against the published SHA-256, and installs it on quit', async () => {
+  it('downloads and verifies the artifact without installing it on an ordinary quit', async () => {
     const { asked, body } = github();
     await asPlatform('win32', undefined, () => checkForUpdates());
 
@@ -217,10 +217,9 @@ describe('staging the new version', () => {
     expect(readFileSync(staged, 'utf8')).toBe(body);
     expect(existsSync(`${staged}.part`)).toBe(false);
 
-    // The quit half of the restart: the file that was staged is the one handed over, silently,
-    // and without starting the app again behind a user who quit for their own reasons.
+    // Closing the app is not consent to replace a local/custom build.
     await applyStagedUpdate();
-    expect(spawned).toEqual([{ file: staged, args: ['/S', '--updated'] }]);
+    expect(spawned).toEqual([]);
   });
 
   /**
@@ -254,10 +253,10 @@ describe('staging the new version', () => {
    * that file being replaced. By rename, never by writing through it - the old build is still
    * executing out of that path while this runs.
    */
-  it('replaces the running AppImage with the staged one', async () => {
+  it('leaves the running AppImage untouched on an ordinary quit', async () => {
     const live = path.join(userData, 'Chat-On-Steroids.AppImage');
     writeFileSync(live, 'the old build');
-    const { body } = github();
+    github();
 
     await asPlatform('linux', live, async () => {
       await checkForUpdates();
@@ -265,7 +264,7 @@ describe('staging the new version', () => {
       await applyStagedUpdate();
     });
 
-    expect(readFileSync(live, 'utf8')).toBe(body);
+    expect(readFileSync(live, 'utf8')).toBe('the old build');
     expect(existsSync(`${live}.new`)).toBe(false);
     expect(spawned).toEqual([]);
   });
@@ -319,10 +318,11 @@ describe('one pass at a time, and one more next time the app opens', () => {
     expect(updateStatus().stage).toBe('ready');
   });
 
-  /** Handed over once. A second quit has nothing to install and must not re-run an installer. */
-  it('hands a staged update over exactly once', async () => {
+  /** One explicit request is consumed exactly once. */
+  it('hands an explicitly requested update over exactly once', async () => {
     github();
     await asPlatform('win32', undefined, () => checkForUpdates());
+    expect(markInstallOnQuit()).toBe(true);
     await applyStagedUpdate();
     await applyStagedUpdate();
     expect(spawned).toHaveLength(1);
@@ -351,9 +351,10 @@ describe('a download that survives the process that fetched it', () => {
     expect(second.asked).toEqual(['latest', 'SHA256SUMS.txt']);
     expect(updateStatus()).toMatchObject({ latest: NEXT, stage: 'ready', error: null });
 
+    expect(markInstallOnQuit()).toBe(true);
     await applyStagedUpdate();
     expect(spawned).toEqual([
-      { file: path.join(userData, 'updates', NEXT, WINDOWS_ASSET), args: ['/S', '--updated'] }
+      { file: path.join(userData, 'updates', NEXT, WINDOWS_ASSET), args: ['/S', '--updated', '--force-run'] }
     ]);
   });
 
@@ -439,9 +440,7 @@ describe('installing on request', () => {
     github();
     await asPlatform('win32', undefined, () => checkForUpdates());
     await applyStagedUpdate();
-    expect(spawned).toEqual([
-      { file: path.join(userData, 'updates', NEXT, WINDOWS_ASSET), args: ['/S', '--updated'] }
-    ]);
+    expect(spawned).toEqual([]);
   });
 });
 
@@ -469,6 +468,7 @@ describe('staged executable authority across later events', () => {
     github();
     await asPlatform('win32', undefined, () => checkForUpdates());
     writeFileSync(path.join(userData, 'updates', NEXT, WINDOWS_ASSET), 'changed after download');
+    expect(markInstallOnQuit()).toBe(true);
     await applyStagedUpdate();
     expect(spawned).toEqual([]);
   });

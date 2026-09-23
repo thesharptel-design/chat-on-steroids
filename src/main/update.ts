@@ -15,9 +15,9 @@
  *   promise, so a second call while a download is running joins it rather than starting a
  *   second download of the same file. That is what makes the repeat timer free: a pass that
  *   finds the release it already staged stops at the release call.
- * - **The user says when.** A staged update is applied during the ordinary quit sequence, and
- *   `installStagedUpdate` is the button that starts that quit on purpose. Nothing here quits or
- *   interrupts anything on its own.
+ * - **The user says when.** A staged update is applied only after the Install action records an
+ *   explicit request. An ordinary quit leaves the verified artifact staged for the next start.
+ *   Nothing here quits or interrupts anything on its own.
  * - **A staged artifact outlives the process that fetched it.** It is kept under the version it
  *   belongs to, so the next start recognises the file it already has and reverifies it rather
  *   than spending another hundred megabytes on the same installer.
@@ -361,17 +361,19 @@ export function markInstallOnQuit(): boolean {
 export async function applyStagedUpdate(): Promise<void> {
   const ready = staged;
   const relaunch = runAfterInstall;
-  staged = null;
   runAfterInstall = false;
-  if (!ready) return;
+  // A local/custom build must not be replaced merely because the user closed it.
+  // The verified download remains on disk and can be adopted again on the next start.
+  if (!ready || !relaunch) return;
+  staged = null;
   try {
     if ((await fileDigest(ready.file)) !== ready.digest) throw new Error('the staged artifact changed after verification');
     if (ready.kind === 'installer') {
       // `--updated` tells the assisted NSIS installer this is an upgrade of the install it
       // already owns, so it keeps the location and the shortcuts instead of asking about them.
-      // `--force-run` is added only when the user pressed Install and is waiting for the app to
-      // come back; an update applied on the way out of an ordinary quit must not reopen it.
-      const args = relaunch ? ['/S', '--updated', '--force-run'] : ['/S', '--updated'];
+      // Reaching this point means the user explicitly pressed Install and is waiting for the app
+      // to come back. Ordinary quits never hand the staged installer to Windows.
+      const args = ['/S', '--updated', '--force-run'];
       const installer = spawn(ready.file, args, { detached: true, stdio: 'ignore', windowsHide: true });
       // An installer that cannot start reports it asynchronously, and an unhandled 'error' on a
       // child process would take the quit down with it.
@@ -386,11 +388,7 @@ export async function applyStagedUpdate(): Promise<void> {
       // Electron spawns it as this one exits, which is the app.exit() that ends the shutdown.
       if (relaunch) app.relaunch({ execPath: ready.target });
     }
-    logInfo(
-      relaunch
-        ? `update: installing ${ready.version} now; the app starts itself again as the new version`
-        : `update: ${ready.version} handed over; the next start of this app is the new version`
-    );
+    logInfo(`update: installing ${ready.version} now; the app starts itself again as the new version`);
   } catch (err) {
     // Nothing is retried and nothing is left half-applied. The next app start checks again.
     logWarn(`could not apply the staged ${ready.version} update: ${(err as Error).message}`);
