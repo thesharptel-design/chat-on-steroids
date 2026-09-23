@@ -50,7 +50,8 @@ const {
   releaseVersion,
   resetUpdateForTests,
   stagedArtifact,
-  updateStatus
+  updateStatus,
+  REVIEWED_UPSTREAM_VERSION
 } = await import('../src/main/update.js');
 
 const NEXT = '99.0.0';
@@ -193,6 +194,24 @@ describe('finding a newer release', () => {
    * which are the same `{latest: null, stage: 'idle'}` record otherwise. The renderer says "up to
    * date" on the strength of that timestamp, so a pass that never reached GitHub must not set it.
    */
+  it('suppresses an upstream release that this custom build has already reviewed', async () => {
+    const { asked } = github({ version: REVIEWED_UPSTREAM_VERSION });
+    expect(REVIEWED_UPSTREAM_VERSION).toBe('2.1.14');
+    await asPlatform('win32', undefined, () => checkForUpdates());
+    expect(updateStatus()).toMatchObject({ current: APP_VERSION, latest: null, stage: 'idle', error: null });
+    expect(updateStatus().checkedAt).toBeGreaterThan(0);
+    expect(asked).toEqual(['latest']);
+    expect(existsSync(path.join(userData, 'updates', REVIEWED_UPSTREAM_VERSION))).toBe(false);
+  });
+
+  it('surfaces the next upstream release after the reviewed floor', async () => {
+    const nextAfterReview = '2.1.15';
+    const { asked } = github({ version: nextAfterReview });
+    await asPlatform('win32', undefined, () => checkForUpdates());
+    expect(updateStatus()).toMatchObject({ latest: nextAfterReview, stage: 'ready', error: null });
+    expect(asked).toEqual(['latest', 'SHA256SUMS.txt', WINDOWS_ASSET]);
+  });
+
   it('reports nothing when the published release is the version already running', async () => {
     const { asked } = github({ version: APP_VERSION });
     expect(updateStatus().checkedAt).toBeNull();

@@ -52,6 +52,20 @@ import { isNewer, type UpdateStatus } from '../shared/types.js';
 const REPO = 'totec448-spec/chat-on-steroids';
 const LATEST_RELEASE_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 
+/**
+ * Newest upstream release this custom build has already been reviewed against.
+ *
+ * The binary can intentionally keep an older base version while selected upstream fixes are
+ * carried forward. A release at or below this floor is therefore not an actionable update and
+ * must not surface an Install button. Raise this only after that upstream release has been
+ * reviewed and the wanted changes have been integrated into this branch.
+ */
+export const REVIEWED_UPSTREAM_VERSION = '2.1.14';
+
+function updateBaselineVersion(): string {
+  return isNewer(REVIEWED_UPSTREAM_VERSION, APP_VERSION) ? REVIEWED_UPSTREAM_VERSION : APP_VERSION;
+}
+
 const CHECK_TIMEOUT_MS = 15_000;
 const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 /**
@@ -163,15 +177,17 @@ async function runPass(): Promise<void> {
   // GitHub answered. From here the UI can tell "current" from "not asked yet", whatever the
   // rest of this pass does with the answer.
   set({ checkedAt: Date.now() });
+  const baseline = updateBaselineVersion();
   // A newly published selection retires the previous executable authority before any file replacement.
-  if (staged?.version !== release.version || !isNewer(release.version, APP_VERSION)) staged = null;
-  if (!isNewer(release.version, APP_VERSION)) {
-    // Up to date, or ahead of the published release on a development build. Both mean nothing
-    // to offer, and `latest` stays null so nothing in the UI claims otherwise.
+  if (staged?.version !== release.version || !isNewer(release.version, baseline)) staged = null;
+  if (!isNewer(release.version, baseline)) {
+    // This custom build may intentionally report an older binary version than the newest
+    // upstream release it has already reviewed. Neither case is actionable, so `latest` stays
+    // null and the renderer has no Install CTA to show.
     set({ latest: null, stage: 'idle' });
     return;
   }
-  logInfo(`update: ${release.version} is available; this app is ${APP_VERSION}`);
+  logInfo(`update: ${release.version} is available; reviewed upstream floor is ${baseline} (binary ${APP_VERSION})`);
   const artifact = stagedArtifact();
   // `latest` and what is being done about it are set in one go. Published separately, the
   // renderer would paint one frame of "a new version exists, and this install updates by
