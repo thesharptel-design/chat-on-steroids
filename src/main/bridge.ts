@@ -1575,11 +1575,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const repairFailed = url.searchParams.get('repairFailed');
     const repairDeferred = url.searchParams.get('repairDeferred');
     const repairAction = url.searchParams.get('repairAction');
-    const action = repairAction === 'reloaded' || repairAction === 'reopened' ? repairAction : null;
+    const syncFallback = url.searchParams.get('syncFallback');
+    const action = repairAction === 'reloaded' || repairAction === 'reopened' || repairAction === 'synced' ? repairAction : null;
     if (repaired) {
-      await confirmRepair(repaired.slice(0, 64), action);
+      await confirmRepair(repaired.slice(0, 64), action, syncFallback);
     } else if (repairFailed) {
-      await failRepairAttempt(repairFailed.slice(0, 64), action);
+      await failRepairAttempt(repairFailed.slice(0, 64), action === 'synced' ? null : action);
     } else if (repairDeferred) {
       deferRepairAttempt(repairDeferred.slice(0, 64));
     }
@@ -5876,12 +5877,12 @@ function queueBrowserRecovery(
 }
 
 /**
- * Ask the companion to re-open the exact server-backed ChatGPT conversation once it is safe.
+ * Ask the companion to refresh the exact server-backed ChatGPT conversation once it is safe.
  *
- * This intentionally does not call ChatGPT's private backend API. The browser is already the
- * authenticated owner of the conversation, so a normal reload lets ChatGPT fetch its current
- * server transcript and the recorder merges the resulting canonical message ids. Local-only
- * tool/worker events never participate in that merge.
+ * The browser page owns the authenticated read. The companion first runs a fixed, read-only
+ * same-origin transcript projection for this exact current conversation and merges only public
+ * user/final-assistant messages. If that proof cannot be completed, the existing page reload is
+ * retained as the compatibility fallback. Local-only tool/worker events never participate.
  */
 export async function requestSessionSync(sessionId: string): Promise<{ queued: boolean; conversationId: string }> {
   const session = await getSession(sessionId);
@@ -7133,7 +7134,7 @@ function attributionRepairCurrent(repair: Repair, session: SessionSummary | null
  * this app is no longer waiting on - an older turn's, or one already re-queued - matches
  * nothing and closes nothing, which is the only safe reading of it.
  */
-async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | null): Promise<void> {
+async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | 'synced' | null, syncFallback: string | null = null): Promise<void> {
   for (const [conversationId, repair] of repairsInFlight) {
     if (repair.state === 'handed' && repair.token === token) {
       repair.state = 'done';
@@ -7178,7 +7179,9 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | nu
           { sessionId: repair.sessionId, turnKey: repair.assistantSource.key });
       }
       if (repair.reason === 'sync') {
-        logInfo(`bridge: ChatGPT conversation ${conversationId} reloaded to sync server turns`);
+        logInfo(action === 'synced'
+          ? `bridge: ChatGPT conversation ${conversationId} synced server turns without reload`
+          : `bridge: ChatGPT conversation ${conversationId} reloaded to sync server turns${syncFallback ? ` (fast path fallback: ${syncFallback.slice(0, 80)})` : ''}`);
       } else {
         await updateRepairProgress(
           conversationId,

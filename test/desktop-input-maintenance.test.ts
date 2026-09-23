@@ -204,6 +204,7 @@ async function worker(inputs: Array<{ id: string; conversationId: string | null;
   const reload = vi.fn(async (_id: number) => {});
   const sendMessage = vi.fn(async (_id: number, _message: any): Promise<{ ok: boolean; ready?: boolean }> => ({ ok: true, ready: true }));
   const update = vi.fn(async (id: number, patch: Partial<Tab>) => { const tab = tabs.find(tab => tab.id === id)!; Object.assign(tab, patch); delete tab.pendingUrl; return tab; });
+  const scripting = { executeScript: vi.fn(async () => []), insertCSS: vi.fn(async () => {}) };
   const fetch = vi.fn(async (input: string, _init?: RequestInit): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> => ({
     ok: true, status: 200,
     json: async () => new URL(input).pathname === '/hello'
@@ -217,7 +218,7 @@ async function worker(inputs: Array<{ id: string; conversationId: string | null;
       runtime: { getManifest: () => ({ version: '2.0.5' }), onMessage: event, onInstalled: event, onStartup: event },
       tabs: { query, get: async (id: number) => tabs.find(tab => tab.id === id), remove, reload, create, update, sendMessage, onCreated: event, onUpdated: event, onRemoved: event },
       alarms: { onAlarm: event, create: () => {}, clear: async () => true },
-      scripting: { executeScript: async () => [], insertCSS: async () => {} }
+      scripting
     },
     fetch, URL, URLSearchParams, AbortController, setTimeout, clearTimeout, TextEncoder, console
   });
@@ -226,10 +227,51 @@ async function worker(inputs: Array<{ id: string; conversationId: string | null;
   await api.load();
   Object.assign(api, { query });
   vm.runInContext('Object.assign(testMaintenance, { offerStopTurns, noteTabConversation, ackCommand })', context);
-  return { ...api, update, inspectModels: (context.testMaintenance as any).inspectRequestedModels as (request: unknown, background: boolean) => Promise<void>, ackDesktopInput: (context.testMaintenance as any).ackDesktopInput as (...args: string[]) => Promise<any>, drainCommandAcks: (context.testMaintenance as any).drainCommandAcks as () => Promise<any>, desktopInput: (context.testMaintenance as any).desktopInput as (...args: any[]) => Promise<any>, events: (context.testMaintenance as any).events as (message: any, sender: any, source: any) => Promise<any>, create, sendMessage, tabs, fetch, windows, remove, reload, local, localSaved, saved };
+  return { ...api, update, inspectModels: (context.testMaintenance as any).inspectRequestedModels as (request: unknown, background: boolean) => Promise<void>, ackDesktopInput: (context.testMaintenance as any).ackDesktopInput as (...args: string[]) => Promise<any>, drainCommandAcks: (context.testMaintenance as any).drainCommandAcks as () => Promise<any>, desktopInput: (context.testMaintenance as any).desktopInput as (...args: any[]) => Promise<any>, events: (context.testMaintenance as any).events as (message: any, sender: any, source: any) => Promise<any>, create, sendMessage, tabs, fetch, scripting, windows, remove, reload, local, localSaved, saved };
 }
 
 describe('one browser maintenance flight per desktop outbox publication', () => {
+  it('syncs the exact server transcript in place without reloading the ChatGPT tab', async () => {
+    const h = await worker([]);
+    h.tabs.push({ id: 7, url: `https://chatgpt.com/c/${secondId}` });
+    await h.authorizeDocument({ tab: { id: 7 }, documentId: 'sync-doc', frameId: 0, url: h.tabs[0]!.url }, { navigationEpoch: 1 });
+    const original = h.fetch.getMockImplementation()!;
+    h.fetch.mockImplementation(async (url, init) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === '/status' && !parsed.searchParams.size) return { ok: true, status: 200, json: async () => ({ ok: true, inputs: [], background: true,
+        repairs: [{ conversationId: secondId, token: 'sync-token', reason: 'sync', safeOnly: true }] }) } as never;
+      return original(url, init);
+    });
+    const projection = { conversationId: secondId, observedAt: Date.now(), leafId: 'leaf', userLineage: ['anchor'],
+      messages: [{ role: 'assistant', messageId: 'answer', providerMessageId: 'answer', final: true, text: 'server answer' }] };
+    h.scripting.executeScript.mockResolvedValue([{ result: { ok: true, projection } }] as never);
+    h.sendMessage.mockImplementation(async (_id, message) => message.type === 'clf-tab-close-check'
+      ? { safe: true, conversationId: secondId } as never
+      : message.type === 'clf-server-sync-projection' ? { ok: true, merged: true } as never : { ok: true } as never);
+    await h.maintain();
+    expect(h.reload).not.toHaveBeenCalled();
+    expect(h.scripting.executeScript).toHaveBeenCalledWith(expect.objectContaining({
+      target: { tabId: 7, documentIds: ['sync-doc'] }, world: 'MAIN', args: [secondId], func: expect.any(Function)
+    }));
+    expect(h.sendMessage).toHaveBeenCalledWith(7, { type: 'clf-server-sync-projection', projection }, { documentId: 'sync-doc' });
+    expect(h.fetch.mock.calls.some(([url]) => new URL(url).searchParams.get('repairAction') === 'synced')).toBe(true);
+  });
+  it('keeps the old reload as fallback when the fixed transcript projection cannot be proven', async () => {
+    const h = await worker([]);
+    h.tabs.push({ id: 7, url: `https://chatgpt.com/c/${secondId}` });
+    const original = h.fetch.getMockImplementation()!;
+    h.fetch.mockImplementation(async (url, init) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === '/status' && !parsed.searchParams.size) return { ok: true, status: 200, json: async () => ({ ok: true, inputs: [], background: true,
+        repairs: [{ conversationId: secondId, token: 'sync-fallback', reason: 'sync', safeOnly: true }] }) } as never;
+      return original(url, init);
+    });
+    h.scripting.executeScript.mockResolvedValue([{ result: { ok: false, error: 'route_unavailable' } }] as never);
+    h.sendMessage.mockResolvedValue({ safe: true, conversationId: secondId } as never);
+    await h.maintain();
+    expect(h.reload).toHaveBeenCalledExactlyOnceWith(7);
+    expect(h.fetch.mock.calls.some(([url]) => new URL(url).searchParams.get('repairAction') === 'reloaded')).toBe(true);
+  });
   it('moves a queued checkpoint to its existing compacted successor once, including legacy elections', async () => {
     const input = { id: firstId, conversationId: secondId, supersededConversationId: firstId };
     const h = await worker([input], undefined, { inputOpenings: { [firstId]: { tab: 7, stage: 'ready' } } });

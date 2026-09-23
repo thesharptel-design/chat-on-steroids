@@ -2299,7 +2299,9 @@ async function maintainOnce() {
     .map((entry) => ({
       conversationId: cleanConversationId(entry && entry.conversationId),
       token: entry && typeof entry.token === 'string' ? entry.token : '',
+      reason: typeof entry?.reason === 'string' ? entry.reason : '',
       requiresClaim: entry?.requiresClaim === true,
+      safeOnly: entry?.safeOnly === true,
       focus: Boolean(entry && entry.focus === true)
     }))
     .filter((entry) => entry.conversationId && entry.token);
@@ -2388,8 +2390,148 @@ async function maintainOnce() {
   if (repairs.length === 0) return clearRetryIfIdle();
 }
 
+/**
+ * One-shot fixed reader executed in ChatGPT's MAIN world for an explicit session Sync.
+ * It returns only the bounded public user/final-assistant projection. Raw server JSON,
+ * cookies and request headers never cross into the extension service worker.
+ */
+async function readServerTranscriptProjection(conversationId) {
+  const CONVERSATION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const PATH = /\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/|$)/i;
+  const MAX_BYTES = 8 * 1024 * 1024, MAX_MESSAGES = 96, MAX_LINEAGE = 512;
+  const MAX_TEXT = 256_000, MAX_TOTAL_TEXT = 1024 * 1024;
+  const route = location.pathname.match(PATH)?.[1] || null;
+  if (!CONVERSATION.test(conversationId) || route !== conversationId ||
+      !['https://chatgpt.com', 'https://chat.openai.com'].includes(location.origin))
+    return { ok: false, error: 'route_unavailable' };
+  const authoredAt = message => {
+    const raw = Number(message?.create_time);
+    if (!Number.isFinite(raw) || raw <= 0) return null;
+    return Math.round(raw < 10_000_000_000 ? raw * 1000 : raw);
+  };
+  const textOf = message => {
+    const content = message?.content;
+    if (!content || typeof content !== 'object' ||
+        !['text', 'multimodal_text'].includes(content.content_type) || !Array.isArray(content.parts)) return '';
+    let value = '';
+    for (const part of content.parts) {
+      if (typeof part !== 'string') continue;
+      if (value) value += '\n';
+      value += part;
+      if (value.length >= MAX_TEXT) break;
+    }
+    return value.slice(0, MAX_TEXT);
+  };
+  const publicMessage = message => {
+    if (!message || typeof message !== 'object') return null;
+    const id = typeof message.id === 'string' && /^[a-zA-Z0-9:_-]{1,200}$/.test(message.id) ? message.id : null;
+    const role = message.author?.role;
+    if (!id || (role !== 'user' && role !== 'assistant')) return null;
+    const metadata = message.metadata && typeof message.metadata === 'object' ? message.metadata : null;
+    if (metadata?.is_visually_hidden_from_conversation === true || metadata?.is_visually_hidden === true) return null;
+    if (role === 'assistant') {
+      if (message.channel === 'analysis' || metadata?.channel === 'analysis') return null;
+      if (message.end_turn !== true || (message.status && message.status !== 'finished_successfully')) return null;
+    }
+    const text = textOf(message);
+    if (!text) return null;
+    const createTime = authoredAt(message);
+    const model = role === 'assistant' && typeof metadata?.model_slug === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(metadata.model_slug)
+      ? metadata.model_slug : null;
+    return { role, messageId: id,
+      ...(role === 'assistant' ? { providerMessageId: id, final: true, ...(model ? { model } : {}) } : {}),
+      text, ...(createTime ? { createTime } : {}) };
+  };
+  const project = data => {
+    if (!data || typeof data !== 'object') return null;
+    const claimed = typeof data.conversation_id === 'string' ? data.conversation_id : typeof data.id === 'string' ? data.id : null;
+    if (claimed && claimed !== conversationId) return null;
+    const raw = data.mapping;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const entries = Object.entries(raw);
+    if (!entries.length || entries.length > 10000) return null;
+    const nodes = new Map();
+    for (const [key, value] of entries) {
+      if (!value || typeof value !== 'object') continue;
+      const id = typeof value.id === 'string' ? value.id : key;
+      if (typeof id !== 'string' || id.length > 200) continue;
+      const parent = typeof value.parent === 'string' && value.parent.length <= 200 ? value.parent : null;
+      const children = Array.isArray(value.children) ? value.children.filter(child => typeof child === 'string' && child.length <= 200).slice(0, 64) : [];
+      nodes.set(id, { id, parent, children, message: value.message });
+    }
+    if (!nodes.size) return null;
+    const leaves = [...nodes.values()].filter(node => !node.children.some(child => nodes.has(child)));
+    if (!leaves.length) return null;
+    const currentNode = typeof data.current_node === 'string' && nodes.has(data.current_node) ? data.current_node : null;
+    let best = null;
+    for (const leaf of leaves.slice(0, 2000)) {
+      const chain = [], seen = new Set(); let at = leaf;
+      while (at && !seen.has(at.id) && chain.length < 5000) { seen.add(at.id); chain.push(at); at = at.parent ? nodes.get(at.parent) : null; }
+      chain.reverse();
+      const rows = []; let latestAt = 0;
+      for (const node of chain) { const row = publicMessage(node.message); if (!row) continue; rows.push(row); latestAt = Math.max(latestAt, row.createTime || 0); }
+      if (!rows.length) continue;
+      const preferred = currentNode === leaf.id ? 1 : 0;
+      if (!best || latestAt > best.latestAt || (latestAt === best.latestAt && preferred > best.preferred)) best = { leafId: leaf.id, rows, latestAt, preferred };
+    }
+    if (!best) return null;
+    const userLineage = best.rows.filter(row => row.role === 'user').map(row => row.messageId).slice(-MAX_LINEAGE);
+    const messages = []; let budget = MAX_TOTAL_TEXT;
+    for (let i = best.rows.length - 1; i >= 0 && messages.length < MAX_MESSAGES && budget > 0; i--) {
+      const row = best.rows[i], text = row.text.length <= budget ? row.text : row.text.slice(0, budget);
+      if (!text) break;
+      messages.push({ ...row, text }); budget -= text.length;
+    }
+    messages.reverse();
+    return messages.length && userLineage.length ? { conversationId, observedAt: Date.now(), leafId: best.leafId, userLineage, messages } : null;
+  };
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = setTimeout(() => controller?.abort(), 8000);
+  try {
+    const paths = [`/backend-api/conversation/${conversationId}`, `/backend-api/f/conversation/${conversationId}`];
+    const read = async (headers = undefined) => {
+      let response = null, failure = 'http_0';
+      for (const path of paths) {
+        response = await fetch(path, { method: 'GET', credentials: 'same-origin', cache: 'no-store',
+          ...(headers ? { headers } : {}), ...(controller ? { signal: controller.signal } : {}) });
+        if (response?.ok) break;
+        failure = `http_${response?.status || 0}`;
+      }
+      return { response, failure };
+    };
+    let { response, failure } = await read();
+    // ChatGPT can hide authenticated conversation routes behind a bearer token and answer 404
+    // without it. Resolve that token only inside the page and never return, log or store it.
+    if (!response?.ok && ['http_401', 'http_403', 'http_404'].includes(failure)) {
+      const auth = await fetch('/api/auth/session', { method: 'GET', credentials: 'same-origin', cache: 'no-store',
+        ...(controller ? { signal: controller.signal } : {}) });
+      if (auth?.ok) {
+        const session = await auth.json().catch(() => null);
+        const accessToken = typeof session?.accessToken === 'string' && session.accessToken.length >= 20 ? session.accessToken : '';
+        if (accessToken) ({ response, failure } = await read({ Authorization: `Bearer ${accessToken}` }));
+      }
+    }
+    if (!response?.ok) return { ok: false, error: failure };
+    if (!response.headers?.get('content-type')?.includes('application/json')) return { ok: false, error: 'content_type' };
+    const reader = response.body?.getReader();
+    if (!reader) return { ok: false, error: 'body_unavailable' };
+    let bytes = 0, text = ''; const decoder = new TextDecoder();
+    try {
+      while (true) {
+        const { done, value } = await reader.read(); if (done) break;
+        bytes += value.byteLength; if (bytes > MAX_BYTES) return { ok: false, error: 'response_too_large' };
+        text += decoder.decode(value, { stream: true });
+      }
+      const projection = project(JSON.parse(text + decoder.decode()));
+      return projection ? { ok: true, projection } : { ok: false, error: 'projection_unavailable' };
+    } finally { void reader.cancel().catch(() => {}); }
+  } catch (error) {
+    return { ok: false, error: String(error?.name || error?.message || 'sync_failed').slice(0, 80) };
+  } finally { clearTimeout(timer); }
+}
+
 async function performBrowserRepairs(repairs, policy) {
-  for (const { conversationId, token, focus, requiresClaim, safeOnly } of repairs) {
+  for (const { conversationId, token, focus, requiresClaim, safeOnly, reason } of repairs) {
     // Re-scanned per repair rather than reused from above. Earlier entries in this same batch
     // may have created a tab, and the scan has to be the state immediately before the action or
     // the duplicate rule below is deciding on a tab list that no longer exists.
@@ -2407,8 +2549,27 @@ async function performBrowserRepairs(repairs, policy) {
     const owned = candidates.filter((tab) => tabConversations[tab.id] === conversationId);
     const [target] = (owned.length > 0 ? owned : candidates).sort((a, b) => a.id - b.id);
     const repairAction = target ? 'reloaded' : 'reopened';
+    let syncFallback = '';
     try {
       if (!target && policy.browserOnly === true) continue;
+      // Sync's first path is read-only: it does not navigate, touch the composer or disturb a
+      // generating answer. Try it before asking whether a destructive fallback reload is safe.
+      if (target && reason === 'sync') {
+        const documentId = tabDocuments[String(target.id)];
+        const result = await chrome.scripting.executeScript({
+          target: { tabId: target.id, ...(documentId ? { documentIds: [documentId] } : { frameIds: [0] }) },
+          world: 'MAIN', func: readServerTranscriptProjection, args: [conversationId]
+        }).catch(() => null);
+        const projection = result?.[0]?.result?.ok === true ? result[0].result.projection : null;
+        if (projection) {
+          const merged = await tabReply(target.id, { type: 'clf-server-sync-projection', projection }, documentId ? { documentId } : undefined, 5000);
+          if (merged?.ok === true) {
+            await call(`/status?repaired=${encodeURIComponent(token)}&repairAction=synced`);
+            continue;
+          }
+          syncFallback = typeof merged?.error === 'string' ? merged.error.slice(0, 80) : 'merge_unavailable';
+        } else syncFallback = typeof result?.[0]?.result?.error === 'string' ? result[0].result.error.slice(0, 80) : 'projection_execution_failed';
+      }
       if (target && safeOnly) {
         const proof = await tabReply(target.id, { type: 'clf-tab-close-check', conversationId });
         if (!proof || proof.safe !== true || proof.conversationId !== conversationId) {
@@ -2418,11 +2579,9 @@ async function performBrowserRepairs(repairs, policy) {
       }
       // Select the working tab within Chrome without stealing OS focus from the
       // desktop app. Tab selection and window activation are separate operations.
-      if (target && focus) {
-        await chrome.tabs.update(target.id, { active: true });
-      }
-      // The tab scan can yield while attribution recovers or a final/new question
-      // retires an interrupted-response repair. Claim only at the action boundary.
+      if (target && focus) await chrome.tabs.update(target.id, { active: true });
+      // The tab scan can yield while attribution recovers or a final/new question retires a
+      // destructive repair. Sync never requires a claim, but other repairs keep the boundary.
       if (requiresClaim) {
         const claim = await call('/repairs/claim', { method: 'POST', body: JSON.stringify({ token }) });
         if (!claim.ok || claim.data?.allowed !== true) continue;
@@ -2438,7 +2597,7 @@ async function performBrowserRepairs(repairs, policy) {
       await call(`/status?repairFailed=${encodeURIComponent(token)}&repairAction=${repairAction}`);
       continue;
     }
-    await call(`/status?repaired=${encodeURIComponent(token)}&repairAction=${repairAction}`);
+    await call(`/status?repaired=${encodeURIComponent(token)}&repairAction=${repairAction}${reason === 'sync' && repairAction === 'reloaded' && syncFallback ? `&syncFallback=${encodeURIComponent(syncFallback)}` : ''}`);
   }
 }
 

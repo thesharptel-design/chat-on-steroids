@@ -643,6 +643,21 @@
     return true;
   }
 
+  function latestServerTranscriptAnchor() {
+    let latest = null;
+    for (const anchor of userAnchorByMessage.values()) {
+      if (!anchor || !Number.isFinite(Number(anchor.seq)) || Number(anchor.seq) < 0 || !anchor.messageId) continue;
+      if (!latest || Number(anchor.seq) > Number(latest.seq)) latest = anchor;
+    }
+    return latest;
+  }
+  function serverTranscriptCompatible(data) {
+    if (!data || typeof data !== 'object' || data.conversationId !== conversationId || data.conversationId !== CLF_DOM.conversationId()) return false;
+    const latest = latestServerTranscriptAnchor();
+    if (!latest || !Array.isArray(data.userLineage)) return false;
+    return data.userLineage.includes(latest.messageId);
+  }
+
   function applyServerTranscript(data) {
     if (!data || typeof data !== 'object') return false;
     const claimed = typeof data.conversationId === 'string' ? data.conversationId : '';
@@ -651,11 +666,7 @@
     const lineage = Array.isArray(data.userLineage) ? data.userLineage : [];
     const messages = Array.isArray(data.messages) ? data.messages : [];
     if (!lineage.length || lineage.length > 512 || !messages.length || messages.length > 96) return false;
-    let latestAnchor = null;
-    for (const anchor of userAnchorByMessage.values()) {
-      if (!anchor || !Number.isFinite(Number(anchor.seq)) || Number(anchor.seq) < 0 || !anchor.messageId) continue;
-      if (!latestAnchor || Number(anchor.seq) > Number(latestAnchor.seq)) latestAnchor = anchor;
-    }
+    const latestAnchor = latestServerTranscriptAnchor();
     if (!latestAnchor) {
       pendingServerTranscript = data;
       return false;
@@ -10791,6 +10802,12 @@
       if (message.type === 'clf-stop-turn') {
         void stopAppTurn(message).then(ok => sendResponse({ ok })).catch(() => sendResponse({ ok: false }));
         return true;
+      }
+      if (message.type === 'clf-server-sync-projection') {
+        const projection = message.projection;
+        if (!serverTranscriptCompatible(projection)) { sendResponse({ ok: false, error: 'lineage_unconfirmed' }); return false; }
+        sendResponse({ ok: true, merged: applyServerTranscript(projection) });
+        return false;
       }
       if (message.type === 'clf-model-catalog') {
         void inspectAppModelCatalog(message).then(result => sendResponse({ ok: result === true,
