@@ -48,6 +48,7 @@ import {
 import { DEFAULT_APPLY_PATCH_FILE_UPDATE_MODE } from '../codex/apply-patch/mode.js';
 import { maybeParseApplyPatchForExec } from '../codex/apply-patch/invocation.js';
 import { composeCommandBatch, parseCommandBatchSections } from '../codex/command-batch.js';
+import { directExecArgv } from '../codex/direct-exec.js';
 import { formatExecOutputForModel, newStreamOutput } from '../codex/exec-output.js';
 import { DEFAULT_TRUNCATION_POLICY, EXEC_OUTPUT_CEILING_POLICY, unifiedExecManager } from '../codex/manager.js';
 import {
@@ -756,7 +757,15 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           // profile work before the requested command even begins. Keep explicit login=true,
           // but make the deterministic/no-profile path the Windows default.
           const useLoginShell = input.login ?? process.platform !== 'win32';
-          const command = deriveExecArgs(shell, boundCommand, useLoginShell);
+          const tty = input.tty ?? DEFAULT_TTY;
+          const childEnv = execChildEnvironment();
+          // A conservative Windows-only fast path skips PowerShell startup for simple native
+          // developer commands. Explicit shell/login requests, batches, tty sessions and any
+          // shell syntax keep the original path unchanged.
+          const directCommand = !isBatch && !tty && input.shell === undefined && !useLoginShell
+            ? directExecArgv(boundCommand, shell.shellType, childEnv)
+            : null;
+          const command = directCommand ?? deriveExecArgs(shell, boundCommand, useLoginShell);
           try {
             // Current Codex intercepts an explicit `apply_patch` shell invocation before spawning
             // the shell process. The parser is the port of apply-patch/src/invocation.rs and uses
@@ -819,8 +828,8 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               truncationPolicy: EXEC_OUTPUT_CEILING_POLICY,
               cwd: dir.real,
               displayCwd: dir.virtual,
-              env: execChildEnvironment(),
-              tty: input.tty ?? DEFAULT_TTY
+              env: childEnv,
+              tty
             });
             // Which durable local session may later write to this process id. The frontend
             // conversation is replaceable during Compact & Resume; the local session is not.
@@ -860,7 +869,8 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               benignExit: benign
             });
             noteDetail(commandDetail.replace(/\s+/g, ' ').slice(0, 120));
-            logInfo(`tool exec_command ${shell.shellType} -> ${output.processId ?? `exit ${output.exitCode ?? 'unknown'}`}`);
+            logInfo(`tool exec_command ${directCommand ? `direct:${directCommand[0]?.split(/[\\/]/).pop() ?? 'native'}` : shell.shellType} ` +
+              `wall=${Math.round(output.wallTimeMs)}ms -> ${output.processId ?? `exit ${output.exitCode ?? 'unknown'}`}`);
             // `benign` was previously spent only on the error count, leaving the model to read
             // `Process exited with code 1` under an empty body and re-run a search that had
             // already answered. It is the same classification, now also said out loud.
